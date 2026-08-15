@@ -15,7 +15,7 @@ SCRIPT_NAME="$(basename "$0")"
 PROJECT_DIR="$PWD"
 HOST_CLAUDE_DIR="${HOME}/.claude"
 CONFIG_DIR="${HOME}/.config/claude-zai"
-ENV_FILE=""
+ENV_FILE="${HOME}/.config/claude-zai/env"
 IMAGE="claude-zai:local"
 VOLUME="claude-zai-home"
 READ_ONLY_PROJECT=0
@@ -329,12 +329,10 @@ copy_one_safe_file() {
   local dst="$SEED_DIR/.claude/$rel"
 
   if is_sensitive_path "$rel"; then
-    warn "Skipping sensitive path: $rel"
     return
   fi
 
   if contains_obvious_secret "$src"; then
-    warn "Skipping file that appears to contain a secret: $rel"
     return
   fi
 
@@ -347,7 +345,6 @@ copy_asset_tree() {
   local src_dir="$HOST_CLAUDE_DIR/$dir_name"
 
   [[ -d "$src_dir" ]] || return 0
-  log "Syncing reusable Claude asset directory: $dir_name/"
 
   while IFS= read -r -d '' file; do
     local rel="${file#"$HOST_CLAUDE_DIR/"}"
@@ -357,7 +354,6 @@ copy_asset_tree() {
 
 copy_markdown_files() {
   [[ -d "$HOST_CLAUDE_DIR" ]] || return 0
-  log "Syncing safe Markdown files from: $HOST_CLAUDE_DIR"
 
   while IFS= read -r -d '' file; do
     local rel="${file#"$HOST_CLAUDE_DIR/"}"
@@ -370,12 +366,10 @@ prepare_seed() {
   mkdir -p "$SEED_DIR/.claude"
 
   if ((NO_SYNC)); then
-    log "Host Claude asset sync disabled (--no-sync)"
     return
   fi
 
   if [[ ! -d "$HOST_CLAUDE_DIR" ]]; then
-    warn "Host Claude directory does not exist; skipping asset sync: $HOST_CLAUDE_DIR"
     return
   fi
 
@@ -405,9 +399,8 @@ reset_volume_if_requested() {
 sync_seed_to_volume() {
   ((NO_SYNC)) && return 0
 
-  log "Copying filtered Claude assets into isolated volume: $VOLUME"
-
   docker run --rm \
+    --env-file "$ENV_FILE" \
     --user 0 \
     --entrypoint /bin/sh \
     -v "$VOLUME:/home/node" \
@@ -445,6 +438,7 @@ run_claude() {
     -v "$project_mount"
     -w /workspace
     "$IMAGE"
+    --dangerously-skip-permissions
   )
 
   if ((${#CLAUDE_ARGS[@]})); then
