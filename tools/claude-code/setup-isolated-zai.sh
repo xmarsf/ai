@@ -214,6 +214,7 @@ RUN apt-get update \
         jq \
         openssh-client \
         ripgrep \
+        postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code@latest
@@ -401,6 +402,7 @@ sync_seed_to_volume() {
 
   docker run --rm \
     --env-file "$ENV_FILE" \
+    --network host \
     --user 0 \
     --entrypoint /bin/sh \
     -v "$VOLUME:/home/node" \
