@@ -6,7 +6,7 @@
 
 **Architecture:** Skill = agent-facing `SKILL.md` orchestration doc + stdlib-only Python tools. `po_ops.py` parses/fills/validates gettext `.po` without external libs (guaranteed msgid integrity via JSON round-trip, never direct `.po` editing). `weblate_api.py` reads auth from `~/.weblate`, queries Weblate REST for untranslated statistics and `push_branch` (wlc 2.1.1 CLI omits it), and constructs the fallback MR URL. `wlc` CLI handles download/upload/commit/push. Weblate server runs the `GitLab merge request` VCS backend, so `wlc push` normally creates the MR server-side; skill parses the URL from push output, falling back to a constructed `merge_requests/new?...` URL.
 
-**Tech Stack:** Python 3 stdlib only (argparse, configparser, json, re, urllib.request), `wlc` 2.1.1 (project venv), Weblate REST API, pytest for tool tests.
+**Tech Stack:** Python 3 stdlib only (argparse, configparser, json, re, urllib.request, concurrent.futures), `wlc` 2.1.1 (project venv), Weblate REST API, pytest for tool tests.
 
 **Spec:** Workflow doc `/home/xmars/dev/vdx-vn/g10-qms/addons/translation-with-weblate.md` + decisions locked in grilling session 2026-08-18 (table in plan discussion, reproduced under Global Constraints).
 
@@ -21,7 +21,9 @@
 - One review gate per invocation: translate all selected components, show summary + diffs, wait for user approval, then upload all → `wlc commit` per component → single project-wide `wlc push` → MR URL.
 - Verification before upload is local only: po integrity + placeholder match + non-empty msgstr. No Odoo DB import.
 - The skill is manually triggered (`/odoo-wlc [component...] [lang]`). With no component args it reports untranslated counts per component and asks which to process.
-- Known server facts (may10-odoo-qms, verified live 2026-08-18): Weblate `https://translate.vdx.vn/api/`, project slug `may10-odoo-qms`, components like `g10-access-management` (slug = module name with `-`), component `repo` = `https://gitlab.vdx.vn/may10/odoo-qms.git`, `branch` = `dev`, `push_branch` = `weblate-translations`, `vcs` = `gitlab` (MR backend).
+- Known server facts (may10-odoo-qms, verified live 2026-08-18): Weblate `https://translate.vdx.vn/api/`, project slug `may10-odoo-qms`, components like `g10-access-management` (slug = module name with `-`), component `repo` = `https://gitlab.vdx.vn/may10/odoo-qms.git`, `branch` = `dev`, `push_branch` = `weblate-translations`, `vcs` = `gitlab` (MR backend), 30 components on one API page.
+- Server quirks that shape the code (each verified by a failing-then-passing live request): the API returns **HTTP 403 to the default `Python-urllib` User-Agent** — every request must send its own; the `[keys]` section of `~/.weblate` is keyed by URL, so `ConfigParser` must be built with `delimiters=('=',)`; and the `/statistics/` payload has **no `untranslated` field** — derive `total - translated - fuzzy`.
+- Fuzzy entries are counted but never modified: `dump` skips them, so local and Weblate counts agree only when fuzzy is reported as its own column.
 - `~/.claude` is not a git repo — skill files cannot be committed; each task ends with a verification step instead of a commit step. Only this plan doc is committed (in `xmarsf/ai`).
 - `wlc` may not be on PATH (it lives in project venv, e.g. `venv3.12/bin/wlc`). Skill resolves it: `which wlc` → else first `venv*/bin/wlc` in project root → else instruct `pip install wlc` and abort.
 
@@ -135,15 +137,18 @@ Expected: 3 files listed (SKILL.md, translation-flow.md, glossary.tsv) + 2 empty
 - Produces (imported by Tasks 3-5 and used by tests):
   - `split_entries(text: str) -> list[list[str]]` — splits raw po text into entries (list of raw lines, comments included); an entry starts at the first comment/keyword line after a blank line
   - `entry_field(lines: list[str], field: str) -> str | None` — concatenated unquoted value of `msgid`/`msgstr`/`msgctxt` for an entry (multiline continuation included), `None` if absent
-  - `po_unquote(parts: list[str]) -> str` — po quoted string parts → decoded string
+  - `po_unquote(parts: list[str]) -> str` — po quoted string parts → decoded string (escapes `\n`/`\t` become REAL newline/tab characters — Task 5's placeholder regex depends on this)
   - `po_quote(s: str) -> str` — string → one quoted po literal (with `"` framing, escapes `\` `"` and real newlines/tabs as `\n` `\t`)
-  - `is_untranslated(lines: list[str]) -> bool` — entry has empty msgstr, is not fuzzy (`#, fuzzy`), not obsolete (`#~`), and has no `msgid_plural`
+  - `is_obsolete(lines) -> bool` / `is_fuzzy(lines) -> bool` — `#~` and `#, fuzzy` predicates, reused by Tasks 3-5
+  - `is_untranslated(lines: list[str]) -> bool` — entry has empty msgstr, is not fuzzy, not obsolete, and has no `msgid_plural`
 
 - [ ] **Step 1: Write the failing test**
 
 Create `~/.claude/skills/odoo-wlc/tests/test_po_ops.py`:
 
 ```python
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -158,13 +163,15 @@ msgstr ""
 #. module: g10_master
 #: code:models/production.py:0
 msgid ""
-"Multi line with %%s placeholder and \\\"quotes\\\"\\n"
+"Multi line with %s placeholder and \\\"quotes\\\"\\n"
 "second line"
-msgstr "Tạo vào"
+msgstr ""
+"Nhiều dòng với %s và \\\"trích dẫn\\\"\\n"
+"dòng hai"
 
 #: model:ir.ui.view,arch_db:g10_master.view_form
 msgid "Batch <b>number</b> %(_batch)s"
-msgstr "Số lô"
+msgstr "Lô <b>number</b> %(_batch)s"
 
 #, fuzzy
 msgid "Fuzzy one"
@@ -174,22 +181,28 @@ msgstr ""
 #~ msgstr "Cũ"
 '''
 
+
 def test_split_entries_count():
     entries = split_entries(FIXTURE)
     assert len(entries) == 5
+
 
 def test_entry_field_simple():
     entries = split_entries(FIXTURE)
     assert entry_field(entries[0], "msgid") == "Production Name"
     assert entry_field(entries[0], "msgstr") == ""
 
+
 def test_entry_field_multiline():
     entries = split_entries(FIXTURE)
     assert entry_field(entries[1], "msgid") == 'Multi line with %s placeholder and "quotes"\nsecond line'
+    assert entry_field(entries[1], "msgstr") == 'Nhiều dòng với %s và "trích dẫn"\ndòng hai'
+
 
 def test_entry_field_missing():
     entries = split_entries(FIXTURE)
     assert entry_field(entries[0], "msgctxt") is None
+
 
 def test_untranslated():
     entries = split_entries(FIXTURE)
@@ -198,10 +211,16 @@ def test_untranslated():
     assert is_untranslated(entries[3]) is False         # fuzzy
     assert is_untranslated(entries[4]) is False         # obsolete
 
+
 def test_quote_roundtrip():
     s = 'a "b" \\ c\nd\te'
     assert po_unquote([po_quote(s)]) == s
 ```
+
+The fixture's already-translated entries carry the SAME placeholders as their msgids
+(`%s`, the `\n`, `<b>`, `%(_batch)s`). This is required: Task 5's `check` scans every
+translated entry in the file, so a fixture with placeholder-dropping translations makes
+`test_check_pass` fail.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -224,6 +243,7 @@ lines (comments + keyword lines) between blank separators. We never rewrite a
 file wholesale — `apply` copies raw lines and replaces only msgstr lines, so
 msgid text and formatting are preserved byte-for-byte.
 """
+import json
 import re
 
 KEYWORD_RE = re.compile(r'^(msgctxt|msgid|msgid_plural|msgstr(?:\[\d+\])?)\s+(.*)$')
@@ -288,10 +308,16 @@ def entry_field(lines, field):
     return po_unquote(parts)
 
 
+def is_obsolete(lines):
+    return any(line.startswith('#~') for line in lines)
+
+
+def is_fuzzy(lines):
+    return any(line.startswith('#,') and 'fuzzy' in line for line in lines)
+
+
 def is_untranslated(lines):
-    if any(line.startswith('#~') for line in lines):
-        return False
-    if any(line.strip() == '#, fuzzy' for line in lines):
+    if is_obsolete(lines) or is_fuzzy(lines):
         return False
     if entry_field(lines, 'msgid_plural') is not None:
         return False
@@ -313,7 +339,7 @@ Expected: 6 passed.
 - [ ] **Step 5: Verify** (substitutes for commit — skill dir is not a git repo)
 
 ```bash
-grep -c 'def ' ~/.claude/skills/odoo-wlc/scripts/po_ops.py   # expect: 6
+grep -c '^def ' ~/.claude/skills/odoo-wlc/scripts/po_ops.py   # expect: 8
 ```
 
 ---
@@ -327,7 +353,12 @@ grep -c 'def ' ~/.claude/skills/odoo-wlc/scripts/po_ops.py   # expect: 6
 **Interfaces:**
 - Consumes: Task 2 functions
 - Produces (used by SKILL.md workflow, Task 7):
-  - CLI: `po_ops.py stats FILE` → stdout JSON `{"total": int, "untranslated": int}`
+  - CLI: `po_ops.py stats FILE` → stdout JSON `{"total": int, "untranslated": int, "fuzzy": int}`.
+    `total` = all non-obsolete entries with a real msgid (header excluded), fuzzy INCLUDED —
+    this matches Weblate's own `total`, and `untranslated` then equals Weblate's
+    `total - translated - fuzzy` (verified live: g10-veston-production 1015/9/9,
+    g10-report 108/4/2, g10-production 337/2/0). Fuzzy is reported separately because
+    `dump` deliberately skips fuzzy entries.
   - CLI: `po_ops.py dump FILE` → stdout JSON `{"entries": [{"key": str, "msgid": str, "msgstr": "", "locations": [str], "comments": [str]}]}` — only untranslated entries, file order. `key` = `msgctxt + "\x04" + msgid` when msgctxt exists else `msgid` (gettext lookup convention; `apply` keys on it).
 
 - [ ] **Step 1: Write the failing tests**
@@ -335,8 +366,6 @@ grep -c 'def ' ~/.claude/skills/odoo-wlc/scripts/po_ops.py   # expect: 6
 Append to `~/.claude/skills/odoo-wlc/tests/test_po_ops.py`:
 
 ```python
-import json, subprocess
-
 SCRIPT = str(Path(__file__).resolve().parent.parent / "scripts" / "po_ops.py")
 FIXTURE_FILE = "/tmp/test_odoo_wlc_fixture.po"
 
@@ -345,18 +374,20 @@ def _write_fixture():
     Path(FIXTURE_FILE).write_text(FIXTURE, encoding="utf-8")
 
 
+def _run(*args, check=True):
+    return subprocess.run([sys.executable, SCRIPT, *args],
+                          capture_output=True, text=True, check=check)
+
+
 def test_stats_cli():
     _write_fixture()
-    out = subprocess.run([sys.executable, SCRIPT, "stats", FIXTURE_FILE],
-                         capture_output=True, text=True, check=True)
-    assert json.loads(out.stdout) == {"total": 3, "untranslated": 1}
+    out = _run("stats", FIXTURE_FILE)
+    assert json.loads(out.stdout) == {"total": 4, "untranslated": 1, "fuzzy": 1}
 
 
 def test_dump_cli():
     _write_fixture()
-    out = subprocess.run([sys.executable, SCRIPT, "dump", FIXTURE_FILE],
-                         capture_output=True, text=True, check=True)
-    data = json.loads(out.stdout)
+    data = json.loads(_run("dump", FIXTURE_FILE).stdout)
     assert len(data["entries"]) == 1
     e = data["entries"][0]
     assert e["key"] == "Production Name"
@@ -365,7 +396,7 @@ def test_dump_cli():
     assert any("field_description" in loc for loc in e["locations"])
 ```
 
-Note: `total` counts non-obsolete, non-header entries (3 = simple + multiline + Batch; fuzzy and obsolete excluded).
+`total` is 4: simple + multiline + Batch + fuzzy. Only the obsolete entry and the header are excluded.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -388,17 +419,23 @@ def entry_key(lines):
 
 def collect_meta(lines):
     locations = [l[2:].strip() for l in lines if l.startswith('#:')]
-    comments = [l[l.index(' ') + 1:].strip() for l in lines
+    comments = [l[2:].strip() for l in lines
                 if l.startswith('#.') or l.startswith('# ')]
     return locations, comments
 
 
+def _payload_entries(text):
+    """Non-obsolete entries that carry a real msgid (header excluded)."""
+    return [e for e in split_entries(text)
+            if not is_obsolete(e) and (entry_field(e, 'msgid') or '') != '']
+
+
 def cmd_stats(path):
-    text = open(path, encoding='utf-8').read()
-    entries = [e for e in split_entries(text) if not any(l.startswith('#~') for l in e)]
-    entries = [e for e in entries if (entry_field(e, 'msgid') or '') != '']
-    untranslated = sum(1 for e in entries if is_untranslated(e))
-    return {"total": len(entries), "untranslated": untranslated}
+    """Counts aligned with Weblate: total includes fuzzy; fuzzy reported apart."""
+    entries = _payload_entries(open(path, encoding='utf-8').read())
+    return {"total": len(entries),
+            "untranslated": sum(1 for e in entries if is_untranslated(e)),
+            "fuzzy": sum(1 for e in entries if is_fuzzy(e))}
 
 
 def cmd_dump(path):
@@ -417,7 +454,7 @@ def cmd_dump(path):
 
 
 def main(argv=None):
-    import argparse, json as _json
+    import argparse
     p = argparse.ArgumentParser(prog='po_ops.py')
     sub = p.add_subparsers(dest='cmd', required=True)
     sub.add_parser('stats').add_argument('file')
@@ -431,14 +468,14 @@ def main(argv=None):
     ck.add_argument('new')
     args = p.parse_args(argv)
     if args.cmd == 'stats':
-        print(_json.dumps(cmd_stats(args.file), ensure_ascii=False))
+        print(json.dumps(cmd_stats(args.file), ensure_ascii=False))
     elif args.cmd == 'dump':
-        print(_json.dumps(cmd_dump(args.file), ensure_ascii=False))
+        print(json.dumps(cmd_dump(args.file), ensure_ascii=False))
     elif args.cmd == 'apply':
-        print(_json.dumps(cmd_apply(args.orig, args.filled, args.output), ensure_ascii=False))
+        print(json.dumps(cmd_apply(args.orig, args.filled, args.output), ensure_ascii=False))
     elif args.cmd == 'check':
         report = cmd_check(args.orig, args.new)
-        print(_json.dumps(report, ensure_ascii=False))
+        print(json.dumps(report, ensure_ascii=False))
         raise SystemExit(0 if report['ok'] else 1)
 
 
@@ -446,7 +483,9 @@ if __name__ == '__main__':
     main()
 ```
 
-(`apply`/`check` referenced in argparse now; implemented Tasks 4-5. To keep this task green, add temporary stubs and delete them in the next tasks — or accept that calling them errors; tests for them don't exist yet, argparse merely registers them.)
+`apply`/`check` are registered in argparse now and implemented in Tasks 4-5; keep `main` at the
+bottom of the file and insert the new functions above it. Calling those two subcommands before
+Task 5 raises `NameError` — no test exercises them yet.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -460,7 +499,7 @@ Expected: 8 passed.
 
 ```bash
 printf 'msgid "A"\nmsgstr ""\n\nmsgid "B"\nmsgstr "Bà"\n' > /tmp/po_smoke.po
-python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py stats /tmp/po_smoke.po   # {"total": 2, "untranslated": 1}
+python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py stats /tmp/po_smoke.po   # {"total": 2, "untranslated": 1, "fuzzy": 0}
 python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py dump /tmp/po_smoke.po    # one entry, key "A"
 ```
 
@@ -474,38 +513,58 @@ python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py dump /tmp/po_smoke.po    # o
 
 **Interfaces:**
 - Consumes: Task 2 functions, Task 3 `entry_key`
-- Produces: CLI `po_ops.py apply ORIG FILLED_JSON -o OUT_PO` → stdout JSON `{"applied": int, "skipped_unknown_keys": [str]}`. Filled format: `{"entries": [{"key": str, "msgstr": str}]}`. Raw msgid lines, comments, locations, and all other entries are copied byte-identical; only the `msgstr` line of matched untranslated entries is replaced with `msgstr "..."` (single line, po_quote escaping). Empty-string msgstr in input = leave entry untouched (lets Claude mark not-yet-sure terms) and counts under `applied` only when non-empty.
+- Produces: CLI `po_ops.py apply ORIG FILLED_JSON -o OUT_PO` → stdout JSON `{"applied": int, "skipped_unknown_keys": [str]}`. Filled format: `{"entries": [{"key": str, "msgstr": str}]}`. Raw msgid lines, comments, locations, and all other entries are copied byte-identical; only the `msgstr` line of matched untranslated entries is replaced with `msgstr "..."` (single line, po_quote escaping). Entry separation is rebuilt as exactly one blank line between entries plus a single trailing newline, so the output has the same line count as the input.
+- `skipped_unknown_keys` lists ONLY keys that carry a non-empty `msgstr` and were not found as an untranslated entry in ORIG. An empty `msgstr` means "Claude deferred this term": the entry is left untouched, is NOT applied, and is NOT reported as unknown.
 
 - [ ] **Step 1: Write the failing tests**
 
 Append to `~/.claude/skills/odoo-wlc/tests/test_po_ops.py`:
 
 ```python
+def _write_filled(entries):
+    Path("/tmp/test_filled.json").write_text(
+        json.dumps({"entries": entries}, ensure_ascii=False), encoding="utf-8")
+
+
 def test_apply_cli_roundtrip():
     _write_fixture()
-    filled = {"entries": [{"key": "Production Name", "msgstr": "Tên sản lượng"}]}
-    Path("/tmp/test_filled.json").write_text(json.dumps(filled, ensure_ascii=False), encoding="utf-8")
-    out = subprocess.run([sys.executable, SCRIPT, "apply", FIXTURE_FILE,
-                          "/tmp/test_filled.json", "-o", "/tmp/test_out.po"],
-                         capture_output=True, text=True, check=True)
+    _write_filled([{"key": "Production Name", "msgstr": "Tên sản lượng"}])
+    out = _run("apply", FIXTURE_FILE, "/tmp/test_filled.json", "-o", "/tmp/test_out.po")
     assert json.loads(out.stdout) == {"applied": 1, "skipped_unknown_keys": []}
     orig = Path(FIXTURE_FILE).read_text(encoding="utf-8")
     new = Path("/tmp/test_out.po").read_text(encoding="utf-8")
     assert 'msgid "Production Name"' in new            # msgid untouched
     assert 'msgstr "Tên sản lượng"' in new             # msgstr filled
-    assert 'Tạo vào' in new                            # other entries preserved
-    assert new.count('field_description') == orig.count('field_description')  # locations intact
+    assert 'Nhiều dòng với %s' in new                  # other entries preserved
+    assert new.count('field_description') == orig.count('field_description')
+
+
+def test_apply_preserves_line_count():
+    _write_fixture()
+    _write_filled([{"key": "Production Name", "msgstr": "Tên sản lượng"}])
+    _run("apply", FIXTURE_FILE, "/tmp/test_filled.json", "-o", "/tmp/test_out.po")
+    orig = Path(FIXTURE_FILE).read_text(encoding="utf-8")
+    new = Path("/tmp/test_out.po").read_text(encoding="utf-8")
+    assert new.count("\n") == orig.count("\n")         # no stray trailing blank line
+    assert new.endswith('"Cũ"\n')
 
 
 def test_apply_skips_unknown_key():
     _write_fixture()
-    filled = {"entries": [{"key": "No Such Term", "msgstr": "X"}]}
-    Path("/tmp/test_filled.json").write_text(json.dumps(filled), encoding="utf-8")
-    out = subprocess.run([sys.executable, SCRIPT, "apply", FIXTURE_FILE,
-                          "/tmp/test_filled.json", "-o", "/tmp/test_out.po"],
-                         capture_output=True, text=True, check=True)
-    assert json.loads(out.stdout)["applied"] == 0
-    assert json.loads(out.stdout)["skipped_unknown_keys"] == ["No Such Term"]
+    _write_filled([{"key": "No Such Term", "msgstr": "X"}])
+    report = json.loads(_run("apply", FIXTURE_FILE, "/tmp/test_filled.json",
+                             "-o", "/tmp/test_out.po").stdout)
+    assert report["applied"] == 0
+    assert report["skipped_unknown_keys"] == ["No Such Term"]
+
+
+def test_apply_ignores_empty_msgstr():
+    _write_fixture()
+    _write_filled([{"key": "Production Name", "msgstr": ""}])
+    report = json.loads(_run("apply", FIXTURE_FILE, "/tmp/test_filled.json",
+                             "-o", "/tmp/test_out.po").stdout)
+    assert report == {"applied": 0, "skipped_unknown_keys": []}   # deferred, not unknown
+    assert 'msgid "Production Name"\nmsgstr ""' in Path("/tmp/test_out.po").read_text(encoding="utf-8")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -514,7 +573,7 @@ def test_apply_skips_unknown_key():
 cd ~/.claude/skills/odoo-wlc && python3 -m pytest tests/test_po_ops.py -v
 ```
 
-Expected: 2 new FAIL (cmd_apply missing / CalledProcessError).
+Expected: 4 new FAIL (cmd_apply missing → `NameError` → CalledProcessError).
 
 - [ ] **Step 3: Implement cmd_apply**
 
@@ -525,33 +584,26 @@ def cmd_apply(orig_path, filled_path, out_path):
     text = open(orig_path, encoding='utf-8').read()
     filled = json.load(open(filled_path, encoding='utf-8'))['entries']
     by_key = {e['key']: e['msgstr'] for e in filled if e.get('msgstr')}
-    applied, skipped = 0, [e['key'] for e in filled
-                           if e['key'] not in () and not e.get('msgstr') is None]
-    # simpler: track keys present in po
-    seen = set()
-    out_lines = []
+    applied, seen, blocks = 0, set(), []
     for entry in split_entries(text):
-        key = entry_key(entry) if not any(l.startswith('#~') for l in entry) else None
+        key = None if is_obsolete(entry) else entry_key(entry)
         if key in by_key and is_untranslated(entry):
             seen.add(key)
-            replaced = False
+            new_entry, replaced = [], False
             for line in entry:
                 if not replaced and line.startswith('msgstr'):
-                    out_lines.append('msgstr ' + po_quote(by_key[key]))
+                    new_entry.append('msgstr ' + po_quote(by_key[key]))
                     replaced = True
                 else:
-                    out_lines.append(line)
+                    new_entry.append(line)
+            blocks.append('\n'.join(new_entry))
             applied += 1
-            out_lines.append('')      # keep blank separator
         else:
-            out_lines.extend(entry)
-            out_lines.append('')
-    open(out_path, 'w', encoding='utf-8').write('\n'.join(out_lines) + '\n')
-    skipped_unknown = [e['key'] for e in filled if e['key'] not in seen]
-    return {"applied": applied, "skipped_unknown_keys": skipped_unknown}
+            blocks.append('\n'.join(entry))
+    open(out_path, 'w', encoding='utf-8').write('\n\n'.join(blocks) + '\n')
+    skipped = [e['key'] for e in filled if e.get('msgstr') and e['key'] not in seen]
+    return {"applied": applied, "skipped_unknown_keys": skipped}
 ```
-
-Import `json` at module top (Task 2 file header): add `import json` next to `import re`. Delete the placeholder `skipped` scratch line if copied — final implementation must not contain it.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -559,13 +611,14 @@ Import `json` at module top (Task 2 file header): add `import json` next to `imp
 cd ~/.claude/skills/odoo-wlc && python3 -m pytest tests/test_po_ops.py -v
 ```
 
-Expected: 10 passed.
+Expected: 12 passed.
 
 - [ ] **Step 5: Verify whitespace fidelity**
 
 ```bash
 python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py apply /tmp/po_smoke.po <(echo '{"entries":[{"key":"A","msgstr":"À"}]}') -o /tmp/po_applied.po
-diff <(grep -c '' /tmp/po_smoke.po) <(grep -c '' /tmp/po_applied.po) && echo SAME_LINE_COUNT
+[ "$(grep -c '' /tmp/po_smoke.po)" = "$(grep -c '' /tmp/po_applied.po)" ] && echo SAME_LINE_COUNT
+diff /tmp/po_smoke.po /tmp/po_applied.po | grep -c '^[<>]'   # expect: 2 (one msgstr line swapped)
 ```
 
 ---
@@ -577,8 +630,11 @@ diff <(grep -c '' /tmp/po_smoke.po) <(grep -c '' /tmp/po_applied.po) && echo SAM
 - Test: `~/.claude/skills/odoo-wlc/tests/test_po_ops.py` (append)
 
 **Interfaces:**
-- Consumes: Task 2 functions
-- Produces: CLI `po_ops.py check ORIG NEW` → stdout JSON report, exit 0 when `ok` else 1. Report: `{"ok": bool, "msgid_mismatch": [keys], "placeholder_mismatch": [{"key": k, "msgid_tokens": [...], "msgstr_tokens": [...]}], "empty_msgstr": [keys], "parse_ok": bool}`. Placeholder tokens = sorted multiset of regex matches `r'%(?:\([^)]*\))?[sd]|%[sd]|%%|\\n|\\t|<[^>]+>'` compared msgid vs msgstr per translated entry. Check runs over ALL non-obsolete entries of NEW (translated before + newly), msgid set compared against ORIG.
+- Consumes: Task 2 functions, Task 3 `entry_key` / `_payload_entries`
+- Produces: CLI `po_ops.py check ORIG NEW` → stdout JSON report, exit 0 when `ok` else 1. Report: `{"ok": bool, "msgid_mismatch": [keys], "placeholder_mismatch": [{"key": k, "msgid_tokens": [...], "msgstr_tokens": [...]}], "empty_msgstr": [keys], "parse_ok": bool}`.
+- `msgid_mismatch` covers three kinds of damage: an ORIG key missing from NEW, an ORIG key whose msgid text changed, and a key present in NEW that ORIG never had (invented entry).
+- Placeholder tokens = sorted multiset of `PLACEHOLDER_RE` matches, compared msgid vs msgstr for every entry with a non-empty msgstr. `entry_field` already DECODES `\n`/`\t`, so the regex must match the real newline/tab characters — not the two-character `\\n` sequence, which never appears in decoded text.
+- Check runs over ALL non-obsolete entries of NEW (pre-existing translations included), msgid set compared against ORIG. Verified against real data: g10-veston-production (1006 translations), g10-production and g10-report all self-check clean, so scanning pre-existing entries produces no false blockers on this project.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -587,19 +643,16 @@ Append to `~/.claude/skills/odoo-wlc/tests/test_po_ops.py`:
 ```python
 def test_check_pass():
     _write_fixture()
-    filled = {"entries": [{"key": "Production Name", "msgstr": "Tên sản lượng"}]}
-    Path("/tmp/test_filled.json").write_text(json.dumps(filled, ensure_ascii=False), encoding="utf-8")
-    subprocess.run([sys.executable, SCRIPT, "apply", FIXTURE_FILE,
-                    "/tmp/test_filled.json", "-o", "/tmp/test_out.po"], check=True)
-    out = subprocess.run([sys.executable, SCRIPT, "check", FIXTURE_FILE, "/tmp/test_out.po"],
-                         capture_output=True, text=True)
+    _write_filled([{"key": "Production Name", "msgstr": "Tên sản lượng"}])
+    _run("apply", FIXTURE_FILE, "/tmp/test_filled.json", "-o", "/tmp/test_out.po")
+    out = _run("check", FIXTURE_FILE, "/tmp/test_out.po", check=False)
     assert out.returncode == 0
     assert json.loads(out.stdout)["ok"] is True
 
 
 def test_check_catches_placeholder_and_msgid_damage():
-    bad = '''msgid "Report %s of %d items\\n"
-msgstr "Báo cáo %d của %d mục\\n"
+    bad = '''msgid "Report %s of %d items"
+msgstr "Báo cáo %d của %d mục"
 
 msgid "Batch <b>number</b>"
 msgstr "Số lô"
@@ -608,15 +661,24 @@ msgid "Mutated"
 msgstr "Đã sửa"
 '''
     Path("/tmp/test_bad_new.po").write_text(bad, encoding="utf-8")
-    orig = 'msgid "Report %s of %d items\\n"\nmsgstr ""\n\nmsgid "Batch <b>number</b>"\nmsgstr ""\n'
+    orig = ('msgid "Report %s of %d items"\nmsgstr ""\n\n'
+            'msgid "Batch <b>number</b>"\nmsgstr ""\n')
     Path("/tmp/test_bad_orig.po").write_text(orig, encoding="utf-8")
-    out = subprocess.run([sys.executable, SCRIPT, "check", "/tmp/test_bad_orig.po", "/tmp/test_bad_new.po"],
-                         capture_output=True, text=True)
+    out = _run("check", "/tmp/test_bad_orig.po", "/tmp/test_bad_new.po", check=False)
     report = json.loads(out.stdout)
     assert out.returncode == 1
     assert report["ok"] is False
     assert len(report["placeholder_mismatch"]) == 2   # %s/%d swap + missing <b></b>
-    assert "Mutated" in report["msgid_mismatch"]
+    assert "Mutated" in report["msgid_mismatch"]      # key absent from ORIG
+
+
+def test_check_catches_dropped_newline():
+    Path("/tmp/test_nl_orig.po").write_text('msgid "Line one\\nLine two"\nmsgstr ""\n', encoding="utf-8")
+    Path("/tmp/test_nl_new.po").write_text('msgid "Line one\\nLine two"\nmsgstr "Dòng một Dòng hai"\n',
+                                           encoding="utf-8")
+    out = _run("check", "/tmp/test_nl_orig.po", "/tmp/test_nl_new.po", check=False)
+    assert out.returncode == 1
+    assert json.loads(out.stdout)["placeholder_mismatch"][0]["msgid_tokens"] == ["\n"]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -625,14 +687,15 @@ msgstr "Đã sửa"
 cd ~/.claude/skills/odoo-wlc && python3 -m pytest tests/test_po_ops.py -v
 ```
 
-Expected: 2 new FAIL.
+Expected: 3 new FAIL.
 
 - [ ] **Step 3: Implement cmd_check**
 
 Insert above `main` in `~/.claude/skills/odoo-wlc/scripts/po_ops.py`:
 
 ```python
-PLACEHOLDER_RE = re.compile(r'%(?:\([^)]*\))?[sd]|%[sd]|%%|\\n|\\t|<[^>]+>')
+# Tokens are matched on DECODED strings, so \n and \t are the real characters.
+PLACEHOLDER_RE = re.compile(r'%(?:\([^)]*\))?[sd]|%[sd]|%%|\n|\t|<[^>]+>')
 
 
 def _ph_tokens(s):
@@ -642,40 +705,15 @@ def _ph_tokens(s):
 def _translated_map(path):
     text = open(path, encoding='utf-8').read()
     result = {}
-    for e in split_entries(text):
-        if any(l.startswith('#~') for l in e):
-            continue
-        msgid = entry_field(e, 'msgid')
-        if msgid in (None, ''):
-            continue
-        result[entry_key(e)] = (msgid, entry_field(e, 'msgstr') or '')
+    for e in _payload_entries(text):
+        result[entry_key(e)] = (entry_field(e, 'msgid'), entry_field(e, 'msgstr') or '')
     return result
 
 
 def cmd_check(orig_path, new_path):
     orig, new = _translated_map(orig_path), _translated_map(new_path)
-    mismatch = [k for k in new if k in orig and new[k][0] != orig[k][0]]
-    mismatch += [k for k in orig if k not in new]
-    placeholder, empty = [], []
-    for k, (msgid, msgstr) in new.items():
-        if msgstr == '' and k in orig and orig[k][1] == '' and not is_untranslated_split(new_path, k):
-            continue  # still-untranslated entries (pre-existing) are not errors
-        if msgstr == '':
-            continue  # pre-existing untranslated pass through silently
-        if _ph_tokens(msgid) != _ph_tokens(msgstr):
-            placeholder.append({"key": k, "msgid_tokens": _ph_tokens(msgid),
-                                "msgstr_tokens": _ph_tokens(msgstr)})
-    ok = not mismatch and not placeholder
-    return {"ok": ok, "msgid_mismatch": mismatch, "placeholder_mismatch": placeholder,
-            "empty_msgstr": empty, "parse_ok": True}
-```
-
-The `is_untranslated_split` call above is wrong on purpose — do NOT keep it. Simplify to the logic actually needed (entries that were untranslated in ORIG and remain untranslated in NEW are fine; entries translated in NEW must have non-empty msgstr and matching placeholders; entries translated in ORIG that become empty in NEW are errors → append to `empty_msgstr`). Final signature:
-
-```python
-def cmd_check(orig_path, new_path):
-    orig, new = _translated_map(orig_path), _translated_map(new_path)
     mismatch = [k for k in orig if k not in new or new[k][0] != orig[k][0]]
+    mismatch += [k for k in new if k not in orig]
     placeholder, empty = [], []
     for k, (msgid, msgstr) in new.items():
         was_translated = k in orig and orig[k][1] != ''
@@ -690,7 +728,9 @@ def cmd_check(orig_path, new_path):
             "empty_msgstr": empty, "parse_ok": True}
 ```
 
-Use the second version.
+Rules encoded here: entries untranslated in ORIG that stay untranslated in NEW are fine; entries
+translated in NEW must have matching placeholders; entries translated in ORIG that turn up empty
+in NEW go to `empty_msgstr`; keys added or msgids altered go to `msgid_mismatch`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -698,7 +738,7 @@ Use the second version.
 cd ~/.claude/skills/odoo-wlc && python3 -m pytest tests/test_po_ops.py -v
 ```
 
-Expected: 12 passed.
+Expected: 15 passed.
 
 - [ ] **Step 5: Verify full-suite CLI smoke**
 
@@ -719,12 +759,14 @@ Expected: report JSON + `exit=1`.
 **Interfaces:**
 - Consumes: `~/.weblate` ini (or `WLC_URL`/`WLC_KEY`)
 - Produces (used by SKILL.md workflow):
-  - `load_config(path='~/.weblate') -> {"url": str, "key": str}` — `[keys]` option name must equal `url` exactly; `WLC_URL`/`WLC_KEY` env take precedence and both must be set together
-  - `api_get(cfg, path) -> dict` — GET `{url}{path}` with `Authorization: Token {key}`; path starts without leading slash (e.g. `projects/may10-odoo-qms/components/`)
+  - `load_config(path='~/.weblate') -> {"url": str, "key": str}` — parsed with `ConfigParser(delimiters=('=',))`: option names under `[keys]` are URLs, and the default `':'` delimiter would split `https://host/api/` after `https`. The key whose option name matches `[weblate] url` wins (first non-empty as fallback). `WLC_URL`/`WLC_KEY` env take precedence and both must be set together.
+  - `api_get(cfg, path) -> dict` — GET `{url}{path}` with `Authorization: Token {key}` **and a non-default `User-Agent`**; translate.vdx.vn answers HTTP 403 to `Python-urllib/3.x` (verified: identical request with `User-Agent: odoo-wlc/1.0` returns 200). Path starts without a leading slash (e.g. `projects/may10-odoo-qms/components/`).
+  - `api_get_paged(cfg, path) -> list` — follows DRF `next` links and concatenates `results`.
+  - `component_stats(cfg, project, slug, lang) -> dict` — Weblate's `/statistics/` payload has NO `untranslated` field (real keys: `total, translated, fuzzy, approved, readonly, failing, suggestions, …`), so untranslated is derived as `total - translated - fuzzy`, matching `po_ops.py stats` exactly. Language missing on the component (404) → all counts `None`.
   - `construct_mr_url(repo, source_branch, target_branch) -> str` — `https://gitlab.vdx.vn/may10/odoo-qms/-/merge_requests/new?merge_request%5Bsource_branch%5D=...&merge_request%5Btarget_branch%5D=...`; strips userinfo (`oauth2:...@`) and `.git` suffix from repo; URL-encodes branch names
   - CLI:
     - `weblate_api.py components PROJECT` → JSON list `[{"slug": ..., "name": ...}]`
-    - `weblate_api.py stats PROJECT LANG` → JSON list `[{"slug": ..., "untranslated": int, "total": int}]` (via per-component `/api/translations/P/C/LANG/statistics/`, skipping components where lang missing → `untranslated: null`)
+    - `weblate_api.py stats PROJECT LANG` → JSON list `[{"slug": ..., "untranslated": int|null, "fuzzy": int|null, "total": int|null}]`, fanned out over a `ThreadPoolExecutor` (30 components: ~46 s sequential → ~3 s)
     - `weblate_api.py push-branch PROJECT COMPONENT` → `{"repo": ..., "branch": ..., "push_branch": ...}`
     - `weblate_api.py mr-url PROJECT COMPONENT` → constructed fallback URL (uses push-branch data)
 
@@ -733,8 +775,8 @@ Expected: report JSON + `exit=1`.
 Create `~/.claude/skills/odoo-wlc/tests/test_weblate_api.py`:
 
 ```python
+import io
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -745,24 +787,81 @@ INI = """[weblate]
 url = https://translate.vdx.vn/api/
 
 [keys]
+https://other.example.com/api/ = OTHERKEY
 https://translate.vdx.vn/api/ = SECRETKEY
 """
 
 
-def test_load_config_ini(tmp_path):
+def _ini(tmp_path, monkeypatch):
+    monkeypatch.delenv("WLC_URL", raising=False)
+    monkeypatch.delenv("WLC_KEY", raising=False)
     ini = tmp_path / "weblate"
     ini.write_text(INI, encoding="utf-8")
-    cfg = weblate_api.load_config(str(ini))
+    return str(ini)
+
+
+def test_load_config_ini(tmp_path, monkeypatch):
+    # option names are URLs: ConfigParser must not treat ':' as a delimiter
+    cfg = weblate_api.load_config(_ini(tmp_path, monkeypatch))
     assert cfg == {"url": "https://translate.vdx.vn/api/", "key": "SECRETKEY"}
 
 
+def test_load_config_picks_key_matching_url(tmp_path, monkeypatch):
+    cfg = weblate_api.load_config(_ini(tmp_path, monkeypatch))
+    assert cfg["key"] == "SECRETKEY"      # not OTHERKEY, which is listed first
+
+
 def test_load_config_env_precedence(tmp_path, monkeypatch):
-    ini = tmp_path / "weblate"
-    ini.write_text(INI, encoding="utf-8")
+    path = _ini(tmp_path, monkeypatch)
     monkeypatch.setenv("WLC_URL", "https://env.example.com/api/")
     monkeypatch.setenv("WLC_KEY", "ENVKEY")
-    cfg = weblate_api.load_config(str(ini))
-    assert cfg == {"url": "https://env.example.com/api/", "key": "ENVKEY"}
+    assert weblate_api.load_config(path) == {"url": "https://env.example.com/api/", "key": "ENVKEY"}
+
+
+def test_api_get_sends_token_and_user_agent(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(req):
+        seen["url"] = req.full_url
+        seen["headers"] = dict(req.headers)
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(weblate_api.urllib.request, "urlopen", fake_urlopen)
+    cfg = {"url": "https://translate.vdx.vn/api/", "key": "K"}
+    assert weblate_api.api_get(cfg, "projects/p/") == {"ok": True}
+    assert seen["url"] == "https://translate.vdx.vn/api/projects/p/"
+    # server answers 403 without a non-default User-Agent
+    assert seen["headers"]["User-agent"] == weblate_api.USER_AGENT
+    assert seen["headers"]["Authorization"] == "Token K"
+
+
+def test_components_follow_pagination(monkeypatch):
+    pages = {
+        "projects/p/components/": {"results": [{"slug": "a", "name": "A"}],
+                                   "next": "https://x/api/projects/p/components/?page=2"},
+        "projects/p/components/?page=2": {"results": [{"slug": "b", "name": "B"}], "next": None},
+    }
+    monkeypatch.setattr(weblate_api, "api_get", lambda cfg, path: pages[path])
+    cfg = {"url": "https://x/api/", "key": "K"}
+    assert weblate_api.cmd_components(cfg, "p") == [{"slug": "a", "name": "A"},
+                                                    {"slug": "b", "name": "B"}]
+
+
+def test_component_stats_derives_untranslated(monkeypatch):
+    # Weblate statistics has no `untranslated` field: total - translated - fuzzy
+    monkeypatch.setattr(weblate_api, "api_get",
+                        lambda cfg, path: {"total": 1015, "translated": 997, "fuzzy": 9})
+    assert weblate_api.component_stats({}, "p", "c", "vi") == {
+        "slug": "c", "untranslated": 9, "fuzzy": 9, "total": 1015}
+
+
+def test_component_stats_missing_language(monkeypatch):
+    def boom(cfg, path):
+        raise SystemExit("404")
+
+    monkeypatch.setattr(weblate_api, "api_get", boom)
+    assert weblate_api.component_stats({}, "p", "c", "zz") == {
+        "slug": "c", "untranslated": None, "fuzzy": None, "total": None}
 
 
 def test_construct_mr_url_strips_credentials_and_git():
@@ -795,32 +894,51 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+# translate.vdx.vn rejects the default Python-urllib agent with HTTP 403.
+USER_AGENT = "odoo-wlc/1.0"
 
 
 def load_config(path="~/.weblate"):
     url, key = os.environ.get("WLC_URL"), os.environ.get("WLC_KEY")
     if url and key:
         return {"url": url, "key": key}
-    cp = configparser.ConfigParser()
-    read = cp.read(os.path.expanduser(path))
-    if not read:
+    # delimiters=('=',) — option names are URLs; the default ':' delimiter
+    # would split "https://host/api/" at "https".
+    cp = configparser.ConfigParser(delimiters=('=',))
+    if not cp.read(os.path.expanduser(path)):
         raise SystemExit("error: no ~/.weblate and no WLC_URL/WLC_KEY — run wlc setup first")
-    url = cp.get("weblate", "url").rstrip("/")
-    for opt, val in cp.items("keys"):
-        if val.strip():
-            key = val.strip()
-            break
-    return {"url": url + "/", "key": key}
+    url = cp.get("weblate", "url").strip().rstrip("/") + "/"
+    keys = {opt.strip().rstrip("/") + "/": val.strip() for opt, val in cp.items("keys")}
+    key = keys.get(url) or next((v for v in keys.values() if v), None)
+    if not key:
+        raise SystemExit("error: no API key for %s in %s" % (url, path))
+    return {"url": url, "key": key}
 
 
 def api_get(cfg, path):
     full = cfg["url"] + path.lstrip("/")
-    req = urllib.request.Request(full, headers={"Authorization": "Token " + cfg["key"]})
+    req = urllib.request.Request(full, headers={"Authorization": "Token " + cfg["key"],
+                                                "User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         raise SystemExit("error: Weblate API %s returned %s" % (full, e.code))
+    except urllib.error.URLError as e:
+        raise SystemExit("error: Weblate API %s unreachable: %s" % (full, e.reason))
+
+
+def api_get_paged(cfg, path):
+    """Follow DRF pagination, returning the concatenated `results`."""
+    out, page = [], api_get(cfg, path)
+    while True:
+        out.extend(page["results"])
+        nxt = page.get("next")
+        if not nxt:
+            return out
+        page = api_get(cfg, nxt[len(cfg["url"]):] if nxt.startswith(cfg["url"]) else nxt)
 
 
 def construct_mr_url(repo, source_branch, target_branch):
@@ -835,25 +953,32 @@ def construct_mr_url(repo, source_branch, target_branch):
 
 
 def cmd_components(cfg, project):
-    data = api_get(cfg, "projects/%s/components/" % project)
-    return [{"slug": c["slug"], "name": c["name"]} for c in data["results"]]
+    return [{"slug": c["slug"], "name": c["name"]}
+            for c in api_get_paged(cfg, "projects/%s/components/" % project)]
+
+
+def component_stats(cfg, project, slug, lang):
+    """Weblate statistics carry no `untranslated` field — derive it."""
+    try:
+        s = api_get(cfg, "translations/%s/%s/%s/statistics/" % (project, slug, lang))
+    except SystemExit:                      # 404 = language not present on component
+        return {"slug": slug, "untranslated": None, "fuzzy": None, "total": None}
+    return {"slug": slug,
+            "untranslated": s["total"] - s["translated"] - s["fuzzy"],
+            "fuzzy": s["fuzzy"],
+            "total": s["total"]}
 
 
 def cmd_stats(cfg, project, lang):
-    out = []
-    for comp in cmd_components(cfg, project):
-        try:
-            s = api_get(cfg, "translations/%s/%s/%s/statistics/" % (project, comp["slug"], lang))
-            out.append({"slug": comp["slug"], "untranslated": s.get("untranslated"),
-                        "total": s.get("total")})
-        except SystemExit:
-            out.append({"slug": comp["slug"], "untranslated": None, "total": None})
-    return out
+    slugs = [c["slug"] for c in cmd_components(cfg, project)]
+    with ThreadPoolExecutor(max_workers=8) as pool:      # ~30 components: 46s -> ~3s
+        return list(pool.map(lambda s: component_stats(cfg, project, s, lang), slugs))
 
 
 def push_branch_info(cfg, project, component):
     c = api_get(cfg, "components/%s/%s/" % (project, component))
-    return {"repo": c["repo"], "branch": c["branch"], "push_branch": c.get("push_branch") or c["branch"]}
+    return {"repo": c["repo"], "branch": c["branch"],
+            "push_branch": c.get("push_branch") or c["branch"]}
 
 
 def main():
@@ -888,19 +1013,20 @@ if __name__ == "__main__":
 cd ~/.claude/skills/odoo-wlc && python3 -m pytest tests/test_weblate_api.py -v
 ```
 
-Expected: 3 passed.
+Expected: 8 passed.
 
 - [ ] **Step 5: Live smoke against real server (read-only)**
 
 ```bash
 python3 ~/.claude/skills/odoo-wlc/scripts/weblate_api.py push-branch may10-odoo-qms g10-access-management
 # expect: {"repo": "https://gitlab.vdx.vn/may10/odoo-qms.git", "branch": "dev", "push_branch": "weblate-translations"}
-python3 ~/.claude/skills/odoo-wlc/scripts/weblate_api.py stats may10-odoo-qms vi | head -c 400
+time python3 ~/.claude/skills/odoo-wlc/scripts/weblate_api.py stats may10-odoo-qms vi | head -c 400
+# expect: 30 rows in ~3s; components without a vi translation report null counts (16 of 30 today)
 python3 ~/.claude/skills/odoo-wlc/scripts/weblate_api.py mr-url may10-odoo-qms g10-access-management
 # expect URL starting https://gitlab.vdx.vn/may10/odoo-qms/-/merge_requests/new?merge_request%5Bsource_branch%5D=weblate-translations
 ```
 
-If `stats` 404s on statistics path, inspect `wlc --format json show may10-odoo-qms/<comp>` for the translations list URL shape and adjust the path template accordingly (server is self-hosted; version may differ from weblate.org latest).
+A 403 from any call means the `User-Agent` header was dropped — that is the server's WAF, not a bad token. A garbled key (`//translate.vdx.vn/api/ = …`) means the `delimiters=('=',)` argument was dropped.
 
 ---
 
@@ -941,8 +1067,12 @@ containing it when no config exists.
 python3 ~/.claude/skills/odoo-wlc/scripts/weblate_api.py stats <project> <lang>
 ```
 
-Show a table: component | untranslated | total. Ask user: which components, or all.
-With component args given, skip the ask.
+Show a table: component | untranslated | fuzzy | total. Rows with `null` counts have no
+translation for that language yet — list them separately, don't offer them for processing.
+`untranslated` is `total - translated - fuzzy` and matches what `po_ops.py stats` reports
+locally; fuzzy entries are counted but NEVER touched by this skill (`dump` skips them), so
+if the user wants fuzzy strings revised, that is a manual Weblate job.
+Ask user: which components, or all. With component args given, skip the ask.
 
 ### 2. Download per selected component
 
@@ -954,16 +1084,23 @@ python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py stats "$WORK/<lang>.orig.po"
 python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py dump "$WORK/<lang>.orig.po" > "$WORK/pending.json"
 ```
 
+Local `untranslated` must equal the API number from step 1. A mismatch means the component
+changed since the report — re-run step 1 for that component before continuing.
+
 ### 3. Translate (Claude does the translation)
 
 For every entry in `pending.json`:
 - Glossary lookup: `grep -P -i "^\d+\t<msgid-escaped>\t" ~/.claude/skills/odoo-wlc/reference/glossary.tsv`
   (escape `|()\.` for grep -P; msgid is column 2). Hit → use column 3 msgstr.
+  Caveat: ~58 of 2262 glossary rows hold multi-line msgids and are split across lines, so a
+  line-anchored grep silently misses them. Multi-line or no-hit terms → translate yourself.
 - Miss → translate yourself: Odoo/QMS domain Vietnamese, keep placeholders EXACT
-  (`%s`, `%d`, `%(...)s`, `%%`, `\n`, XML tags), title-case like Odoo UI conventions.
+  (`%s`, `%d`, `%(...)s`, `%%`, newlines, tabs, XML tags), title-case like Odoo UI conventions.
 - Location comments (`model:ir.model.fields,...` = field label, `arch_db` = view text,
   `code:` = runtime string) inform register/length.
 - Ambiguous or business-critical terms → translate + flag in the review summary.
+  Genuinely unsure → emit `"msgstr": ""` for that key: `apply` leaves the entry untranslated
+  instead of guessing, and it is not reported as an unknown key.
 Write `{"entries": [{"key": ..., "msgstr": ...}]}` to `$WORK/filled.json` (all entries, one file per component).
 
 ### 4. Build + validate
@@ -973,12 +1110,15 @@ python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py apply "$WORK/<lang>.orig.po"
 python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py check "$WORK/<lang>.orig.po" "$WORK/<lang>.po"
 ```
 
-`check` exit 1 → fix reported entries (placeholder mismatches are blockers), rerun. Never upload with failing check.
+`apply` reporting a non-empty `skipped_unknown_keys` means a key was invented or the file moved
+on — re-run `dump` and rebuild `filled.json` for those keys.
+`check` exit 1 → fix reported entries (placeholder and msgid mismatches are blockers), rerun.
+Never upload with failing check.
 
 ### 5. Review gate (single, all components)
 
 Present:
-- Table: component | translated | warnings | glossary misses (term → proposed)
+- Table: component | translated | deferred (empty msgstr) | warnings | glossary misses (term → proposed)
 - Per component: `diff "$WORK/<lang>.orig.po" "$WORK/<lang>.po"` shown in full (msgid lines give context).
 
 WAIT for user approval or amendments. Amend → back to step 4 for affected component.
@@ -1007,17 +1147,21 @@ WAIT for user approval or amendments. Amend → back to step 4 for affected comp
 
 ## Failure recovery
 
-- `wlc upload` fails "locked" → `"$WLC" unlock <project>/<component>/<lang>`, retry once.
+- `wlc upload` fails "locked" → `"$WLC" unlock <project>/<component>` (unlock is a
+  component-level operation — do not pass the `/lang` suffix), retry once.
 - `wlc push` fails (non-fast-forward / upstream moved) → `"$WLC" pull <project>`, then re-run
   step 2 (re-download, re-apply via `apply` against fresh orig — msgstrs from filled.json are reused),
   re-check, re-upload only if diffs changed, then `commit` + `push` again.
 - Any Weblate API `Object not found` → wrong slug; list with
   `python3 ~/.claude/skills/odoo-wlc/scripts/weblate_api.py components <project>`.
+- Weblate API HTTP 403 → the request lost its `User-Agent` header (server WAF rejects
+  `Python-urllib/*`), not an auth problem. HTTP 401 → bad/expired token in `~/.weblate`.
 
 ## Rules (from reference/translation-flow.md)
 
 - Never edit `.po`/`.pot` in the source repo. Changes go: upload → Weblate commit → push → MR.
 - msgid text is never modified by us; `check` enforces it.
+- Fuzzy entries are out of scope; obsolete (`#~`) entries are copied through untouched.
 - Cleanup: leave `/tmp/odoo-wlc/` (user may want diffs); mention path in final answer.
 ```
 
@@ -1047,27 +1191,34 @@ WLC=/home/xmars/dev/vdx-vn/g10-qms/venv3.12/bin/wlc
 python3 ~/.claude/skills/odoo-wlc/scripts/weblate_api.py stats may10-odoo-qms vi
 ```
 
-Pick one component with `untranslated > 0`.
+Pick one component with `untranslated > 0`. As of 2026-08-18 exactly three qualify:
+`g10-veston-production` (9 untranslated, 9 fuzzy, 1015 total), `g10-report` (4/2/108),
+`g10-production` (2/0/337). If all read 0, someone finished the language — pick another lang
+or skip to Step 4.
 
 - [ ] **Step 2: Dry-run the pipeline (download → dump → apply with 1 real translation → check)**
 
 ```bash
 WORK=/tmp/odoo-wlc/may10-odoo-qms/<component>; mkdir -p "$WORK"
 "$WLC" download may10-odoo-qms/<component>/vi --output "$WORK/vi.orig.po"
+python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py stats "$WORK/vi.orig.po"
+# local untranslated/fuzzy/total must equal the API row from Step 1
 python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py dump "$WORK/vi.orig.po" > "$WORK/pending.json"
 # translate just ONE entry into filled.json by hand for the test
 python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py apply "$WORK/vi.orig.po" "$WORK/filled.json" -o "$WORK/vi.po"
 python3 ~/.claude/skills/odoo-wlc/scripts/po_ops.py check "$WORK/vi.orig.po" "$WORK/vi.po"; echo "exit=$?"
+diff <(grep -c '' "$WORK/vi.orig.po") <(grep -c '' "$WORK/vi.po") && echo SAME_LINE_COUNT
 ```
 
-Expected: check exit 0; `diff vi.orig.po vi.po` shows exactly one msgstr line changed; header block (msgid "") byte-identical.
+Expected: check exit 0; `diff vi.orig.po vi.po` shows exactly two changed lines (one msgstr
+swapped); identical line count; header block (msgid "") byte-identical.
 
 - [ ] **Step 3: STOP — do not upload/push in this task.** Report results. Real upload happens on first user-invoked run.
 
 - [ ] **Step 4: Full test suite + permissions**
 
 ```bash
-cd ~/.claude/skills/odoo-wlc && python3 -m pytest tests/ -v    # expect 15 passed
+cd ~/.claude/skills/odoo-wlc && python3 -m pytest tests/ -v    # expect 23 passed (15 po_ops + 8 weblate_api)
 chmod +x scripts/po_ops.py scripts/weblate_api.py
 ```
 
@@ -1098,6 +1249,26 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 **Locked decisions coverage:** scope A (round-trip only) ✔; placement A ✔; self-contained + glossary in skill ✔; Claude translates, single gate (SKILL.md §5) ✔; vi default + lang arg ✔; MR via push output w/ fallback (§8) ✔; component selection UX (§1) ✔; local-only verification (§4) ✔.
 
-**Placeholder scan:** Task 5 Step 3 deliberately shows a wrong-then-correct version with instruction to use the second — final file must contain only the correct `cmd_check`. Task 4 has one scratch line flagged for deletion. No TBD/TODO elsewhere.
+**Verification pass (2026-08-18, all plan code executed before writing it here):**
+- Every code block in Tasks 2-6 was run; the suite is green at 23 tests (15 `po_ops` + 8 `weblate_api`).
+- The whole pipeline ran against real data: downloaded `g10-veston-production/vi` (1015 entries),
+  dumped 9 untranslated, applied 9, output kept the same 7348 lines with exactly 18 diff lines
+  (9 × msgstr), `check` exit 0, `stats` then reported 0 untranslated.
+- `weblate_api.py` was smoke-tested live read-only: `push-branch` returns the documented repo/branch/
+  push_branch, `mr-url` matches the expected fallback URL, `stats` returns 30 rows in ~3 s and its
+  untranslated numbers equal the local `po_ops` numbers on all three pending components.
+- Fixed before landing: HTTP 403 on default urllib User-Agent; `ConfigParser` `':'` delimiter
+  shredding the `[keys]` URL; missing `untranslated` field in Weblate statistics; fixture/expectation
+  mismatches in four tests; `skipped_unknown_keys` swallowing deferred entries; stray trailing blank
+  line from `apply`; dead `\\n`/`\\t` branches in the placeholder regex; first-key-wins auth
+  selection; unpaginated component listing; 46 s sequential stats; component-level `wlc unlock`;
+  fuzzy accounting; glossary multi-line rows.
+- Still unverified by design: `wlc push` output containing the MR URL (needs a real mutation);
+  the constructed `merge_requests/new?...` URL is the fallback for exactly that case.
 
-**Type consistency:** `entry_key`/`po_quote`/`po_unquote` names consistent across Tasks 2-5; filled.json shape `{"entries":[{"key","msgstr"}]}` identical in Task 3 (dump emits extra fields — apply reads only key/msgstr) and SKILL.md §3; CLI verbs match between Tasks 3-6 and SKILL.md grep check in Task 7.
+**Placeholder scan:** no TBD/TODO, no deliberately-wrong code samples — every block in this plan is
+the block that was executed. **Type consistency:** `entry_key`/`po_quote`/`po_unquote`/`is_obsolete`/
+`is_fuzzy`/`_payload_entries` names consistent across Tasks 2-5; filled.json shape
+`{"entries":[{"key","msgstr"}]}` identical in Task 3 (dump emits extra fields — apply reads only
+key/msgstr) and SKILL.md §3; `stats` output shape (`total`/`untranslated`/`fuzzy`) identical between
+`po_ops.py`, `weblate_api.py`, and the SKILL.md report table.
