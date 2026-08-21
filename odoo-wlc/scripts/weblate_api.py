@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-# translate.vdx.vn rejects the default Python-urllib agent with HTTP 403.
+# Some Weblate deployments' WAF rejects the default Python-urllib agent with HTTP 403.
 USER_AGENT = "odoo-wlc/1.0"
 
 
@@ -53,15 +53,53 @@ def api_get_paged(cfg, path):
         page = api_get(cfg, nxt[len(cfg["url"]):] if nxt.startswith(cfg["url"]) else nxt)
 
 
-def construct_mr_url(repo, source_branch, target_branch):
+def parse_repo(repo):
+    """Split a component's `repo` URL into (host, project_path), e.g.
+    'https://oauth2:tok@gitlab.example.com/grp/proj.git' -> ('gitlab.example.com', 'grp/proj')."""
     clean = repo.split("://", 1)[-1].split("@", 1)[-1]        # drop scheme + userinfo
     if clean.endswith(".git"):
         clean = clean[:-len(".git")]
     host, _, proj = clean.partition("/")
-    q = urllib.parse.urlencode({
-        "merge_request[source_branch]": source_branch,
-        "merge_request[target_branch]": target_branch})
-    return "https://%s/%s/-/merge_requests/new?%s" % (host, proj, q)
+    return host, proj
+
+
+def load_gitlab_config(path="~/.gitlab"):
+    """[gitlab]\nhttps://gitlab.example.com/ = <token> — one line per GitLab host."""
+    cp = configparser.ConfigParser(delimiters=('=',))
+    if not cp.read(os.path.expanduser(path)):
+        raise SystemExit("error: no ~/.gitlab — add a [gitlab] section with "
+                          "'<host-url> = <token>' (needed to look up merge requests)")
+    if not cp.has_section("gitlab"):
+        raise SystemExit("error: ~/.gitlab has no [gitlab] section")
+    return {opt.strip().rstrip("/") + "/": val.strip() for opt, val in cp.items("gitlab")}
+
+
+def gitlab_token_for_host(tokens, host):
+    key = "https://" + host + "/"
+    token = tokens.get(key)
+    if not token:
+        raise SystemExit("error: no GitLab token for %s in ~/.gitlab" % key)
+    return token
+
+
+def find_mr(host, project_path, token, source_branch, target_branch):
+    """Query the GitLab API for the real open MR — never guess/construct a URL."""
+    q = urllib.parse.urlencode({"source_branch": source_branch,
+                                "target_branch": target_branch, "state": "opened"})
+    full = "https://%s/api/v4/projects/%s/merge_requests?%s" % (
+        host, urllib.parse.quote(project_path, safe=""), q)
+    req = urllib.request.Request(full, headers={"PRIVATE-TOKEN": token, "User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            results = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise SystemExit("error: GitLab API %s returned %s" % (full, e.code))
+    except urllib.error.URLError as e:
+        raise SystemExit("error: GitLab API %s unreachable: %s" % (full, e.reason))
+    if not results:
+        raise SystemExit("error: no open MR %s -> %s in %s (has it been pushed/merged already?)"
+                          % (source_branch, target_branch, project_path))
+    return max(results, key=lambda mr: mr["updated_at"])["web_url"]
 
 
 def cmd_components(cfg, project):
@@ -100,7 +138,7 @@ def main():
     sub.add_parser("components").add_argument("project")
     st = sub.add_parser("stats"); st.add_argument("project"); st.add_argument("lang")
     pb = sub.add_parser("push-branch"); pb.add_argument("project"); pb.add_argument("component")
-    mu = sub.add_parser("mr-url"); mu.add_argument("project"); mu.add_argument("component")
+    mu = sub.add_parser("find-mr"); mu.add_argument("project"); mu.add_argument("component")
     args = p.parse_args()
     cfg = load_config()
     if args.cmd == "components":
@@ -111,7 +149,9 @@ def main():
         result = push_branch_info(cfg, args.project, args.component)
     else:
         info = push_branch_info(cfg, args.project, args.component)
-        result = {"url": construct_mr_url(info["repo"], info["push_branch"], info["branch"])}
+        host, proj = parse_repo(info["repo"])
+        token = gitlab_token_for_host(load_gitlab_config(), host)
+        result = {"url": find_mr(host, proj, token, info["push_branch"], info["branch"])}
     print(json.dumps(result, ensure_ascii=False))
 
 

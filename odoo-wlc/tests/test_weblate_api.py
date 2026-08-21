@@ -87,10 +87,73 @@ def test_component_stats_missing_language(monkeypatch):
         "slug": "c", "untranslated": None, "fuzzy": None, "total": None}
 
 
-def test_construct_mr_url_strips_credentials_and_git():
-    url = weblate_api.construct_mr_url(
-        "https://oauth2:token123@gitlab.vdx.vn/may10/odoo-qms.git",
-        "weblate-translations", "dev")
-    assert url == ("https://gitlab.vdx.vn/may10/odoo-qms/-/merge_requests/new"
-                   "?merge_request%5Bsource_branch%5D=weblate-translations"
-                   "&merge_request%5Btarget_branch%5D=dev")
+def test_parse_repo_strips_credentials_and_git():
+    host, proj = weblate_api.parse_repo(
+        "https://oauth2:token123@gitlab.vdx.vn/may10/odoo-qms.git")
+    assert (host, proj) == ("gitlab.vdx.vn", "may10/odoo-qms")
+
+
+GITLAB_INI = """[gitlab]
+https://gitlab.vdx.vn/ = GLTOKEN
+"""
+
+
+def _gitlab_ini(tmp_path):
+    ini = tmp_path / "gitlab"
+    ini.write_text(GITLAB_INI, encoding="utf-8")
+    return str(ini)
+
+
+def test_load_gitlab_config_matches_by_host(tmp_path):
+    tokens = weblate_api.load_gitlab_config(_gitlab_ini(tmp_path))
+    assert weblate_api.gitlab_token_for_host(tokens, "gitlab.vdx.vn") == "GLTOKEN"
+
+
+def test_gitlab_token_for_host_missing_raises(tmp_path):
+    tokens = weblate_api.load_gitlab_config(_gitlab_ini(tmp_path))
+    try:
+        weblate_api.gitlab_token_for_host(tokens, "other.example.com")
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
+
+
+def test_find_mr_sends_private_token_and_state_opened(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(req):
+        seen["url"] = req.full_url
+        seen["headers"] = dict(req.headers)
+        return io.BytesIO(json.dumps(
+            [{"web_url": "https://gitlab.vdx.vn/g/p/-/merge_requests/7",
+              "updated_at": "2026-08-20T10:00:00Z"}]).encode("utf-8"))
+
+    monkeypatch.setattr(weblate_api.urllib.request, "urlopen", fake_urlopen)
+    url = weblate_api.find_mr("gitlab.vdx.vn", "g/p", "GLTOKEN", "weblate-translations", "dev")
+    assert url == "https://gitlab.vdx.vn/g/p/-/merge_requests/7"
+    assert seen["headers"]["Private-token"] == "GLTOKEN"
+    assert "state=opened" in seen["url"]
+    assert "source_branch=weblate-translations" in seen["url"]
+    assert "target_branch=dev" in seen["url"]
+
+
+def test_find_mr_picks_most_recently_updated(monkeypatch):
+    def fake_urlopen(req):
+        return io.BytesIO(json.dumps([
+            {"web_url": "https://x/mr/1", "updated_at": "2026-08-19T10:00:00Z"},
+            {"web_url": "https://x/mr/2", "updated_at": "2026-08-20T10:00:00Z"},
+        ]).encode("utf-8"))
+
+    monkeypatch.setattr(weblate_api.urllib.request, "urlopen", fake_urlopen)
+    url = weblate_api.find_mr("gitlab.vdx.vn", "g/p", "GLTOKEN", "src", "dev")
+    assert url == "https://x/mr/2"
+
+
+def test_find_mr_no_open_mr_raises(monkeypatch):
+    monkeypatch.setattr(weblate_api.urllib.request, "urlopen",
+                        lambda req: io.BytesIO(b"[]"))
+    try:
+        weblate_api.find_mr("gitlab.vdx.vn", "g/p", "GLTOKEN", "src", "dev")
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass

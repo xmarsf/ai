@@ -94,9 +94,16 @@ Weblate pushes the committed `.po` changes to its GitLab branch. Open a merge re
 - Never edit `.po` / `.pot` files directly in the repo — translation changes go through Weblate (upload) and land via the GitLab MR.
 - Repeat the flow per component that has untranslated terms.
 
-## Server facts (verified 2026-08-18, may10-odoo-qms)
+## Server facts (general, not tied to any one deployment)
 
-- Weblate API root: from `~/.weblate` `[weblate] url` (currently `https://translate.vdx.vn/api/`).
-- Component `repo`: `https://gitlab.vdx.vn/may10/odoo-qms.git`, `branch`: `dev`, `push_branch`: `weblate-translations`, `vcs`: `gitlab` (GitLab merge request backend).
-- `wlc show` does NOT print `push_branch` (wlc 2.1.1 omits it). Use `scripts/weblate_api.py push-branch` instead.
-- With the GitLab MR backend, `wlc push` makes the Weblate server open the MR itself; its output contains the MR URL.
+- Weblate API root always comes from `~/.weblate` `[weblate] url` (or `WLC_URL`) — never hardcode
+  a server. Each component carries its own `repo`, `branch`, and `push_branch`; read them via the
+  API, don't assume values from a prior project.
+- `wlc show` does NOT print `push_branch` (verified on wlc 2.1.1). Use `scripts/weblate_api.py
+  push-branch` instead.
+- With a GitLab-backed component (`vcs: gitlab`, i.e. the GitLab merge request backend), `wlc push`
+  makes the Weblate server open the MR itself; its output contains the MR URL.
+- If that output is missing/terse, don't guess a URL — query the GitLab API for the real open
+  MR (`scripts/weblate_api.py find-mr`, source = `push_branch`, target = `branch`). This needs
+  `~/.gitlab` (`[gitlab]` section, `<host-url> = <token>`), matched by the host in the
+  component's `repo` — never assume a single fixed GitLab host either.
