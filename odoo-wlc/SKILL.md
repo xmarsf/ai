@@ -79,10 +79,16 @@ For every entry in `pending.json`:
   (`%s`, `%d`, `%(...)s`, `%%`, newlines, tabs, XML tags), title-case like Odoo UI conventions.
 - Location comments (`model:ir.model.fields,...` = field label, `arch_db` = view text,
   `code:` = runtime string) inform register/length.
-- Ambiguous or business-critical terms → translate + flag in the review summary.
-  Genuinely unsure → emit `"msgstr": ""` for that key: `apply` leaves the entry untranslated
-  instead of guessing, and it is not reported as an unknown key.
+- Ambiguous or business-critical terms → translate anyway (best-effort msgstr), but also
+  record it as a review item (see below). Genuinely unsure → emit `"msgstr": ""` for that
+  key: `apply` leaves the entry untranslated instead of guessing, and it is not reported as
+  an unknown key.
 Write `{"entries": [{"key": ..., "msgstr": ...}]}` to `$WORK/filled.json` (all entries, one file per component).
+
+Also write `$WORK/needs_review.json` — one entry per key that is ambiguous/business-critical,
+a glossary miss, or deferred (empty `msgstr`):
+`{"entries": [{"key": ..., "msgid": ..., "msgstr": ..., "reason": "ambiguous"|"glossary_miss"|"deferred"}]}`.
+Empty `{"entries": []}` if nothing qualifies — still write the file, don't skip it.
 
 ### 4. Build + validate
 
@@ -98,11 +104,22 @@ Never upload with failing check.
 
 ### 5. Review gate (single, all components)
 
-Present:
-- Table: component | translated | deferred (empty msgstr) | warnings | glossary misses (term → proposed)
-- Per component: `diff "$WORK/<lang>.orig.po" "$WORK/<lang>.po"` shown in full (msgid lines give context).
+Present a table: component | translated | deferred (empty msgstr) | needs_review count.
 
-WAIT for user approval or amendments. Amend → back to step 4 for affected component.
+Then give the user two file paths per component — do not just print a diff inline:
+- **Translated file** (all applied translations): `$WORK/<lang>.po`
+- **Needs-check file** (terms to review — ambiguous, glossary misses, deferred): `$WORK/needs_review.json`
+
+Tell the user to open `needs_review.json`, correct any `msgstr` values (or fill in blanks
+for deferred entries) directly in that file, and confirm when done — or confirm as-is if
+no changes needed.
+
+WAIT for user confirmation. On confirmation:
+- If `needs_review.json` was edited, merge its `{key, msgstr}` pairs into `$WORK/filled.json`
+  (overwrite matching keys), then go back to step 4 for that component to rebuild + re-check.
+- If unchanged, proceed to step 6.
+
+Do not proceed to step 6 for any component until its review is confirmed.
 
 ### 6. Upload + commit (after approval, every selected component)
 
