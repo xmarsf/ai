@@ -9,10 +9,12 @@ Based on the [official Claude Code dev container docs](https://code.claude.com/d
 From this directory (`tools/claude-code/`):
 
 ```bash
-docker build -t my-claude-dev .
+docker build \
+  --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
+  -t claude-code .
 ```
 
-The image is based on `node:22-bookworm`, installs Claude Code via npm into a `dev`-owned prefix (`~/.npm-global`, so auto-update works), and runs as the non-root `dev` user.
+The image is based on `node:22-bookworm` and runs as the non-root `node` user, which the base image already assigns uid/gid `1000`. The `UID`/`GID` build args remap that user to match your host account so the bind-mounted workspace is writable — without this, Claude can read your project but cannot write to it. Claude Code is installed via npm into a user-owned prefix (`~/.npm-global`), which is what makes auto-update work.
 
 ## 2. Run Claude Code
 
@@ -22,18 +24,18 @@ From your project root:
 PROJECT=$(basename $(pwd))
 docker run -it --rm \
   -v $(pwd):/workspace \
-  -v claude-code-config-$PROJECT:/home/dev \
+  -v claude-code-config-$PROJECT:/home/node \
   --cap-drop=ALL \
-  my-claude-dev claude
+  claude-code claude
 ```
 
 ### What each part does
 
 | Part | Purpose |
-|------|---------|
+| ------ | --------- |
 | `PROJECT=$(basename $(pwd))` | Derives a per-project name from the current directory |
 | `-v $(pwd):/workspace` | Bind-mounts the project into the container (`WORKDIR` is `/workspace`) |
-| `-v claude-code-config-$PROJECT:/home/dev` | Named volume for the `dev` home — persists auth, settings, history, **and auto-updated Claude Code versions** (`~/.npm-global` lives here) across runs, isolated per project |
+| `-v claude-code-config-$PROJECT:/home/node` | Named volume for the `node` home — persists auth, settings, history, **and auto-updated Claude Code versions** (`~/.npm-global` lives here) across runs, isolated per project |
 | `--cap-drop=ALL` | Drops all Linux capabilities for a hardened, unprivileged container |
 | `--rm` | Removes the container on exit (state lives in the volume, not the container) |
 | `my-claude-dev` | Image built in step 1 |
@@ -49,11 +51,11 @@ On first run, follow the authentication prompt inside the container:
   ```bash
   docker run -it --rm \
     -v $(pwd):/workspace \
-    -v claude-code-config-$PROJECT:/home/dev \
+    -v claude-code-config-$PROJECT:/home/node \
     -e ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic" \
     -e ANTHROPIC_AUTH_TOKEN="YOUR_API_KEY" \
     --cap-drop=ALL \
-    my-claude-dev claude
+    claude-code claude
   ```
 
 Because auth persists in the named volume, subsequent runs skip login.
