@@ -76,8 +76,8 @@ modernization).
 - Filename prefix uses a **hyphen** (`pre-foo.py`); an underscore prefix is a
   silent no-op — the script never runs.
 - Signature: `def migrate(cr, version)` — build an `env` inside if ORM access
-  is needed. (The single-`env` signature change applies to 19 `post_init_hook`
-  init hooks, not migration scripts — compat:UNMAPPED, confirm at admission.)
+  is needed. (Init hooks take a single `env` on 17/18/19 — compat:init-hooks-env-signature;
+  migration scripts keep `migrate(cr, version)`.)
 - Stored-field ttype changes: never let the ORM auto-cast — rename the old
   column away in `pre-`, backfill and drop in `post-`.
 - Every script idempotent: guard with existence checks; upgrade paths retry.

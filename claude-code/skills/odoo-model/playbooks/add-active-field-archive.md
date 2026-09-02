@@ -71,8 +71,9 @@ Called by: [implement-model](implement-model.md), [implement-field](implement-fi
 ## Pitfalls
 
 - Don't infer Archive/Unarchive availability from the model field alone.
-  compat:UNMAPPED(web list/form controllers enable Archive/Unarchive only when
-  `active` (or `x_active`) is present in the loaded view fields, observed on 19);
+  compat:archive-active-field-view (web list/form controllers enable Archive/Unarchive
+  only when `active` (or `x_active`) is present in the loaded view fields, on
+  17/18/19 alike);
   keep the field in each relevant architecture even when invisible.
 - Don't assume archiving needs new ACL rows — check existing `perm_write` first.
 - A `write()`-only archive guard looks complete until someone creates a record already

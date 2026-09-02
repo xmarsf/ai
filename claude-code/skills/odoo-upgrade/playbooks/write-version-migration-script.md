@@ -23,9 +23,10 @@ Called by: [implement-model](../../odoo-model/playbooks/implement-model.md), [st
 - [ ] For a column type change: rename the old column away in the `pre-` script so the
   ORM creates the new column fresh, then backfill and drop the renamed column in the
   `post-` script — never let the ORM auto-cast in place (note: Migrate scripts).
-- [ ] Write `migrate(cr, version)` with that exact signature — the single-`env`
-  hook signature (compat:UNMAPPED(19 init hooks receive a single `env` instead of
-  `(cr, version)`; migration scripts keep `migrate(cr, version)`) applies to init
+- [ ] Write `migrate(cr, version)` with that exact signature — init hooks take a
+  single `env` (compat:init-hooks-env-signature: pre/post init hooks take `env` on
+  17/18/19 — not a 19 change; migration scripts keep `migrate(cr, version)`) which
+  applies to init
   hooks only, not migration scripts (note: Migrate
   scripts). Build an env inside if ORM access is needed.
 - [ ] Guard xml-id lookups with `raise_if_not_found=False` — the record may not exist
@@ -56,6 +57,6 @@ Called by: [implement-model](../../odoo-model/playbooks/implement-model.md), [st
 - note: Migration data — phase semantics (`pre-`/`post-`/`end-`), file naming, version
   directory matching, version-skip execution order.
 - note: Migrate scripts — `migrate(cr, version)` signature, env construction, the
-  19 init-hook signature change (see compat:UNMAPPED above) and why it does not
+  init-hook `env` signature (see compat:init-hooks-env-signature above) and why it does not
   apply here, column-type-change
   rename/backfill pattern.

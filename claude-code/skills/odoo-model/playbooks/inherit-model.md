@@ -19,9 +19,9 @@ Parent playbook: [implement-model](implement-model.md) — this is its existing-
   **string** `_inherit = 'existing.model'` (MetaModel auto-fills `_name`).
 - [ ] Also needs abstract mixin(s) on the same identity → set
   `_name = 'existing.model'` **and** `_inherit = ['existing.model', 'mixin…']`.
-  Do not use list `_inherit` alone without `_name` (compat:UNMAPPED(list-form
-  `_inherit` without explicit `_name` logs a startup warn and infers identity from
-  the Python class name, observed on 19)).
+  Do not use list `_inherit` alone without `_name` (compat:inherit-list-form:
+  list-form `_inherit` without explicit `_name` logs a startup warn on 19 and infers
+  identity from the Python class name; 17/18 infer silently).
 - [ ] Extends a child/line model so it can belong to a second parent? → run playbook:
   [shared-line-model-second-parent](shared-line-model-second-parent.md).
 - [ ] Simplifies an over-engineered selection flow on an existing line model? → run
@@ -52,6 +52,6 @@ Parent playbook: [implement-model](implement-model.md) — this is its existing-
 ## Relevant knowledge-base
 
 - `note: Odoo Extensible Inheritance` — §3 list vs string `_inherit`, list-form
-  warn path (see the compat:UNMAPPED marker above)
+  warn path (see compat:inherit-list-form above)
 - `note: Model - Inheritance & Registration Helpers` — `MetaModel.__new__` resolution
 - `source: odoo/orm/models.py:MetaModel.__new__` (path per compat:orm-module-layout)

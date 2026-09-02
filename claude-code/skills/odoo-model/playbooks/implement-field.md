@@ -29,8 +29,8 @@ Called by: [implement-model](implement-model.md), [implement-wizard](implement-w
 - [ ] Chatter field history (`tracking=True`)? Concrete model (or every consumer of a
   shared mixin field) must inherit `mail.thread` — otherwise Odoo logs
   `unknown parameter 'tracking'` and no track messages are posted
-  (compat:UNMAPPED(`tracking=` ignored with unknown-parameter warning on a model
-  without `mail.thread`, observed on 19)). Prefer putting
+  (compat:tracking-without-mail-thread: `tracking=` ignored with unknown-parameter
+  warning on a model without `mail.thread`, on 17/18/19 alike). Prefer putting
   `tracking=` only on thread models, not on abstract mixins reused by non-thread
   models (Mail / field tracking rule).
 - [ ] Needs `domain=`, or `readonly=`/`required=` that might differ between Python and  a specific view? → run playbook: [field-constraint-placement](field-constraint-placement.md).

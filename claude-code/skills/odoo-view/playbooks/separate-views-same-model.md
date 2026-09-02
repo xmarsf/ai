@@ -20,10 +20,10 @@ Called by: [inherit-view](inherit-view.md), [implement-view](implement-view.md)
 - [ ] Create a dedicated `ir.actions.act_window` for the alternate UI with its own
   domain/context.
 - [ ] Bind the views to the action via `ir.actions.act_window.view` records, one per
-  view mode — not the `views` field eval trick (compat:UNMAPPED(action `views`
-  eval binding unreliable since 17; `ir.actions.act_window.view` records are the
-  stable form); note: Separate
-  Views Same Model §3).
+  view mode — not the `views` field eval trick (compat:act-window-views-binding:
+  action `views` is a compute-only field, so eval binding does not persist on
+  17/18/19; `ir.actions.act_window.view` records are the stable form); note:
+  Separate Views Same Model §3).
 - [ ] Where Python code returns or adjusts the action, fetch it via `_for_xml_id()`
   (note: Separate Views Same Model §4).
 - [ ] Route Many2one navigation from other screens into the alternate form via
