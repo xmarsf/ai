@@ -30,17 +30,21 @@ out X".
    per-major layout (`orm-module-layout`): `odoo/models.py` at 17/18 vs
    `odoo/orm/` at 19. No proof, no admission.
 2. **`odoo compat add --id <slug> --title ... --kind ... --replacement ...
-   --status-per-version 17=...,18=...,19=... --proof N=odoo/...:"PATTERN"`.**
-   It validates the proof against the declared tree (refuses on mismatch),
-   writes the entry as `status: candidate` with `source: session:<date>`, and
-   prints the resulting diff plus the push command. Skills never hand-edit the
-   matrix YAML.
-3. **User action, not agent action:** the user pushes the branch and opens the
+   --status-per-version 17=...,18=...,19=... --proof N=odoo/...:"PATTERN"
+   [--note ...] [--edition enterprise]`.** Add `--tree VER=PATH` flags when the
+   project config does not cover every version a proof targets. The command
+   validates the proof against the declared tree (refuses on mismatch — that
+   refusal is correct behavior, not an obstacle), writes the entry as
+   `status: candidate` with `source: session:<date>`, and prints the resulting
+   diff plus the push command. Skills never hand-edit the matrix YAML.
+3. **`odoo compat check` must pass on the branch before the MR** (local gate:
+   every proof re-verified against the declared trees).
+4. **User action, not agent action:** the user pushes the branch and opens the
    MR on gitlab.vdx.vn (odoo-cli repo). The agent prints the command; it never
    opens the MR itself.
-4. **Review promotes** the entry to `confirmed`. Until then it is a candidate:
+5. **Review promotes** the entry to `confirmed`. Until then it is a candidate:
    usable, but cited as such.
-5. **`odoo compat check` keeps every proof honest** against the local trees
+6. **`odoo compat check` keeps every proof honest** against the local trees
    afterwards (PROOF OK / LINE DRIFT / PROOF STALE).
 
 A quirk with no reproducible core proof is **not admitted**: it stays a
