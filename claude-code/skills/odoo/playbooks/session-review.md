@@ -18,21 +18,16 @@ Entry point: [SKILL.md](../SKILL.md)
    evidence over the session's own summary.
 - [ ] **Audit [SKILL.md](../SKILL.md)'s opening protocol and playbook matching.**
    Per step: expected vs actual +
-   evidence + gap. Include auth boundaries and dirty-worktree preservation. Check
-   glossary controls: **pipeline_depth**, **lazy expansion** (top-level only at step
-   0), **test surface** → tdd tier, **test ownership** / infrastructure carve-out,
-   **usage_counters_bumped**, **zero-token** (`export_plan` when N× shape, no
-   re-derivation of matched playbooks, deterministic tools over reasoning loops,
-   `exports_this_run` at close).
+   evidence + gap. Include auth boundaries, dirty-worktree preservation, lazy
+   expansion (top-level only at step 0), deterministic tools over reasoning
+   loops, and test ownership / infrastructure carve-out.
 - [ ] **Classify each gap:** execution miss | guidance gap | external blocker |
-   implementation defect | **zero-token miss** (re-inferred a captured shape, hand-authored
-   N near-copies without export, left a recurring lesson only in chat).
+   implementation defect.
 - [ ] **Implementation defects** → finish via original workflow (not the retrospective).
-- [ ] **Before durable lessons**, search all stores (playbooks, RULES, vault,
-   glossaries, existing scripts/helpers). No new guidance for an execution miss already covered.
+- [ ] **Before durable lessons**, search all stores (playbooks, RULES,
+   existing scripts/helpers). No new guidance for an execution miss already covered.
 - [ ] **Route genuine guidance gaps through [reference/updating.md](../reference/updating.md).** Update the
-   narrowest existing owner first (incl. **export artifact** when the lesson is a
-   deterministic transform). Create a new category only when its admission test
+   narrowest existing owner first. Create a new category only when its admission test
    passes. Keep concrete session names in `## Example instance`, not Steps/Pitfalls.
 - [ ] **Repair close-out bookkeeping.** Update usage counters only for playbooks
    actually followed; do not create dated audit/history prose merely to show that the

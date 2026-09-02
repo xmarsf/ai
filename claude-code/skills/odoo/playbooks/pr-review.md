@@ -30,14 +30,12 @@ Entry point: [SKILL.md](../SKILL.md)
 - [ ] Preserve dirty worktrees — read-only unless edits requested; don't checkout MR
   refs/rebase/reset/stash over unrelated local changes. Prefer API raw-file reads or
   `git show <ref>:<path>` when a verified ref exists.
-- [ ] Dispatch `odoo-review` (`model: sonnet`, foreground) for the findings pass —
-  don't review manually. Give it the MR diff (or `target...head`), changed/untracked
-  files, MR description/context; its checklist already covers the project coding
-  guideline,
-  lint, ORM/security/performance, test coverage — don't restate those. Evaluate its
-  return per the orchestrator's **Evaluating sub-agent returns** section (follow up
-  if a known file/model was skipped, cap 3). Prioritize blocker/should-fix findings
-  plus anything it can't see (cross-MR context, pipeline history). Cite exact
+- [ ] Do the findings pass in this session — no sub-agent dispatch. Run
+  `odoo verify <changed paths> --root <root>` on the MR's changed modules
+  (AST + RULES lint + `git diff --check` in one shot), then review the diff
+  yourself against the pr-review checklist: project coding guideline,
+  ORM/security/performance, test coverage. Prioritize blocker/should-fix findings
+  plus anything the tools can't see (cross-MR context, pipeline history). Cite exact
   file/line from the MR head.
 - [ ] Normalize finding paths before displaying or posting them: for addon files,
   use `<module>/<relative-file>:<line>` (for example,
