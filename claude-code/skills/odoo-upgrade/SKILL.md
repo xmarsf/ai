@@ -17,12 +17,14 @@ move its data. Single-version artifact work belongs to **odoo-model** /
 ## Before anything else
 
 Read `config/project.json` at the project root and follow the five-step opening
-protocol in the **odoo** router skill (`skills/odoo/SKILL.md`): missing/null
+protocol in the **odoo** router skill ([../odoo/SKILL.md](../odoo/SKILL.md)): missing/null
 `odoo-version`, or null/absent `odoo_community_path` (plus
 `odoo_enterprise_path` for the enterprise edition) → stop and tell the user to
 run `odoo setup`. **No fallback.** If you reached this skill directly (no
 router), still resolve the version first under the same rules, and state
-`"<major> <edition>"` in your first output line.
+`Odoo <major> <edition> — core: <odoo_community_path>` in your first output
+line (add `— enterprise: <odoo_enterprise_path>` when the edition is
+enterprise).
 
 Everything below consumes the matrix through `odoo compat` — never from
 memory.
@@ -99,5 +101,8 @@ modernization).
   never from a stale doc.
 - A module rename or field rename migrates dependent addons too — grep every
   addon for the old name, not just the owner.
+- Rename/refactor of a model that **already holds data** in the same major
+  routes here (a migration script is needed); routine model edits stay with
+  **odoo-model**.
 - After the port: run `odoo verify` (version-gated lint), then
   `odoo runtime-test --init update` for the touched modules.

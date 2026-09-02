@@ -104,7 +104,7 @@ the exact models involved, wait for a second, genuinely different occurrence.
   create audit/history prose merely to record that a check ran.
 
 **Link, don't just name, every reference**: playbook calls use a relative
-Markdown link to the real file (e.g. `run playbook:
-[create-model](../odoo-model/playbooks/create-model.md)`), never
+Markdown link to the real file, e.g. run playbook:
+[create-model](../../odoo-model/playbooks/create-model.md) — never
 wrapped in backticks. Cross-skill calls point into the owning task skill's
 `playbooks/`.

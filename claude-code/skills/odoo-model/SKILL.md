@@ -18,12 +18,14 @@ test authoring/running to **odoo-test**; cross-major porting to **odoo-upgrade**
 ## Before anything else
 
 Read `config/project.json` at the project root and follow the five-step opening
-protocol in the **odoo** router skill (`skills/odoo/SKILL.md`): missing/null
+protocol in the **odoo** router skill ([../odoo/SKILL.md](../odoo/SKILL.md)): missing/null
 `odoo-version`, or null/absent `odoo_community_path` (plus
 `odoo_enterprise_path` for the enterprise edition) → stop and tell the user to
 run `odoo setup`. **No fallback.** If you reached this skill directly (no
 router), still resolve the version first under the same rules, and state
-`"<major> <edition>"` in your first output line.
+`Odoo <major> <edition> — core: <odoo_community_path>` in your first output
+line (add `— enterprise: <odoo_enterprise_path>` when the edition is
+enterprise).
 
 Never assert a version-specific API fact from memory. Before claiming "in this
 version X works like Y", check `odoo compat get <id>` (known quirk) or
@@ -70,3 +72,10 @@ version X works like Y", check `odoo compat get <id>` (known quirk) or
 - Verification gate: declarative schema → module-update path; business logic →
   TDD path via the **odoo-test** skill (`odoo runtime-test`).
 - Label/string changes route translation work to the **odoo-wlc** skill.
+- Automation tiebreaker: this skill owns the **Python side** of automation
+  (server-action code, model-level automation logic); **odoo-view** owns the
+  XML data-record authoring (`data/*.xml` record definitions) — a
+  `base.automation`/`ir.actions.server` change splits that way, not to one skill.
+- Rename/refactor of a model that **already holds data** in the same major
+  routes to **odoo-upgrade** (a migration script is needed); routine model
+  edits stay here.

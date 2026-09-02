@@ -35,11 +35,9 @@ Parent playbook: [implement-field](../../odoo-model/playbooks/implement-field.md
    that merge in the compute/write path that builds the row (dedup-key → in-flight
    `Command.create` vals dict, appending `Command.link(id)` per match), not in the
    migration.
-- [ ] Prune now-orphaned `Selection` `msgid` blocks from `.po` files (search for
-   `selection__<model>__<field>__*`). Run playbook:
-   the **odoo-wlc** skill (manifest-and-translation-hygiene flow)
-   for the shared-msgid discipline (keep `field_description`, only strip the `#:`
-   reference line when a msgid is shared) and the version-bump/pylint close-out.
+- [ ] Orphaned `Selection` msgids left behind in `.po` files after the ttype
+   change → translation cleanup routes to the **odoo-wlc** skill
+   (manifest-and-translation-hygiene flow).
 - [ ] Update any Python code that previously built the field's value through a
    lossy string map to instead assign the real referenced record's id
    directly (this is usually the actual point of the fix — the old Selection

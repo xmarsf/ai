@@ -57,11 +57,11 @@ Entry point: [SKILL.md](../SKILL.md)
   - High-impact business behavior defaults to TDD; record exceptions.
   - On TDD: plan `expand-when: write-odoo-tests` (fires
     **mandatory** nested `test-case-selection` before `write-odoo-tests` dispatch — see
-    [write-odoo-tests](../odoo-test/playbooks/write-odoo-tests.md) hard gate). At evaluation time only
+    [write-odoo-tests](../../odoo-test/playbooks/write-odoo-tests.md) hard gate). At evaluation time only
     note expand-when; **do not open nested yet** unless this task is pure testing.
     Step 3 of SKILL must open selection and finish a **case table** before type
     choice / tdd spawn. Multi-addon → also `expand-when: test-cross-module`
-    ([test-cross-module](../odoo-test/playbooks/test-cross-module.md)).
+    ([test-cross-module](../../odoo-test/playbooks/test-cross-module.md)).
 - [ ] **Validate dispatch.** Note worktree state; ensure test package exists when TDD.
   User approval only for nontrivial unapproved design.
   Do not dispatch an LLM agent for work a script or matched playbook already

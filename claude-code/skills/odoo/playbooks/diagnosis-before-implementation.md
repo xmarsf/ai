@@ -6,7 +6,7 @@ symptom to source. Distinct from implementing a known feature/fix, where the
 behavior change itself is already the goal.
 
 Entry point: [SKILL.md](../SKILL.md)
-Called by: [live-debug](../odoo-debug/playbooks/live-debug.md), [local-record-debug](../odoo-debug/playbooks/local-record-debug.md)
+Called by: [live-debug](../../odoo-debug/playbooks/live-debug.md), [local-record-debug](../../odoo-debug/playbooks/local-record-debug.md)
 
 ## Usage
 - used: 0 (tracking started 2026-07-10)
@@ -19,10 +19,10 @@ Called by: [live-debug](../odoo-debug/playbooks/live-debug.md), [local-record-de
    only add persistent tests once a repo-side bug is confirmed, not while still
    diagnosing.
 - [ ] **Gather evidence before touching code** — DB query, RPC read (see
-   run playbook: [xmlrpc-live-query](../odoo-debug/playbooks/xmlrpc-live-query.md) when the target is a live/remote instance), or
+   run playbook: [xmlrpc-live-query](../../odoo-debug/playbooks/xmlrpc-live-query.md) when the target is a live/remote instance), or
    local reproduction. Don't reason from the bug report's prose description alone.
 - [ ] Posting a bill/journal entry fails with a date-vs-sequence `ValidationError`?
-   → run playbook: [account-sequence-date-mismatch-triage](../odoo-debug/playbooks/account-sequence-date-mismatch-triage.md)
+   → run playbook: [account-sequence-date-mismatch-triage](../../odoo-debug/playbooks/account-sequence-date-mismatch-triage.md)
    (data triage, not a code change).
 - [ ] **Map evidence back to source**: search the repo for the model/view/action/
    controller/traceback function implicated, and cite file:function_name. Prefer source
@@ -41,8 +41,8 @@ Called by: [live-debug](../odoo-debug/playbooks/live-debug.md), [local-record-de
 - [ ] **Promote to the normal orchestrate flow only after the defect is scoped in
    source**: re-run [task-evaluation](task-evaluation.md) broad-shape matching on the
    now-scoped fix — a code-level bug fix or logic extension on an existing model
-   routes to [implement-model](../odoo-model/playbooks/implement-model.md) (existing-model branch, see
-   [inherit-model](../odoo-model/playbooks/inherit-model.md)); a declarative-only defect (view/security/report)
+   routes to [implement-model](../../odoo-model/playbooks/implement-model.md) (existing-model branch, see
+   [inherit-model](../../odoo-model/playbooks/inherit-model.md)); a declarative-only defect (view/security/report)
    routes to its own broad shape. Add persistent tests if the behavior can regress,
    implement, and verify against the original reproduction steps.
 

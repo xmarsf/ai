@@ -31,7 +31,7 @@ Parent playbook: [inherit-view](inherit-view.md) — returning sub-step; resume 
      unless the surrounding model is already consistently live;
    - raw 0-100 value → do not use the **percentage widget**;
    - avoid explicit `string=` in XML when the field label plus i18n field_description is
-     sufficient, otherwise add matching `model_terms:ir.ui.view` translations.
+     sufficient; any translation additions go through the **odoo-wlc** skill.
 - [ ] Verify with full Odoo tests via `odoo runtime-test` against the DB from
    `config/project.json`. If no DB is configured/reachable there, at least run
    Python compile, XML parse, scoped file-level assertions, and `git diff --check`.
