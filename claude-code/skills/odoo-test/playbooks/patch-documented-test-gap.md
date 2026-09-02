@@ -87,5 +87,6 @@ Parent playbook: [write-odoo-tests](write-odoo-tests.md) — alternative branch;
 ## Relevant knowledge-base
 
 - `odoo runtime-test` — the known-good pytest-odoo env/db invocation (see the
-  odoo-test skill); `HttpCase`/tour runs need pytest-odoo ≥2.2.0
-  (compat:UNMAPPED(pytest-odoo 2.1.3 broken against 19 `--odoo-http`)).
+  odoo-test skill); `HttpCase`/tour runs need pytest-odoo ≥2.2.0 (2.1.3 is
+  broken against Odoo 19's `--odoo-http`) — a tooling requirement, not an Odoo
+  API fact, so it lives in the odoo-cli README rather than the compat matrix.
