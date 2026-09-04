@@ -5,7 +5,7 @@ Applies when: overriding a controller method that renders a QWeb template.
 Called by: [implement-report](../../odoo-view/playbooks/implement-report.md), [implement-controller](implement-controller.md)
 
 ## Usage
-- used: 1
+- used: 0
 - last used: 2026-07-10
 
 ## Steps

@@ -9,7 +9,7 @@ Parent playbook: [write-odoo-tests](write-odoo-tests.md) — returning sub-step;
 the next parent step after this checklist.
 
 ## Usage
-- used: 3
+- used: 0
 - last used: 2026-07-17
 
 ## Steps

@@ -5,7 +5,7 @@ Applies when: adding footer aggregations (sum, avg, min, max) to list view colum
 Called by: [inherit-view](inherit-view.md), [implement-view](implement-view.md)
 
 ## Usage
-- used: 1
+- used: 0
 - last used: 2026-07-10
 
 ## Steps

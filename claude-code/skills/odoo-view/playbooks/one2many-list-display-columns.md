@@ -6,7 +6,7 @@ values inside an Odoo one2many/list subview.
 Parent playbook: [inherit-view](inherit-view.md) — returning sub-step; resume the next parent step after this checklist.
 
 ## Usage
-- used: 1
+- used: 0
 - last used: 2026-07-13
 
 ## Steps

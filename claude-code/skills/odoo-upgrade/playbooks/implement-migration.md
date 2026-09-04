@@ -10,7 +10,7 @@ routes here for the script-writing step.
 Entry point: [SKILL.md](../SKILL.md)
 
 ## Usage
-- used: 1 (tracking started 2026-07-16)
+- used: 0 (tracking started 2026-07-16)
 - last used: 2026-07-21
 
 ## Steps

@@ -14,7 +14,7 @@ extension that touches no field/view/security artifact still routes here for its
 Entry point: [SKILL.md](../SKILL.md)
 
 ## Usage
-- used: 4 (tracking started 2026-07-13)
+- used: 0 (tracking started 2026-07-13)
 - last used: 2026-07-17
 
 ## Steps

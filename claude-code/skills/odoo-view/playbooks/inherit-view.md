@@ -9,7 +9,7 @@ Called by: [implement-view](implement-view.md), [implement-model](../../odoo-mod
 path.
 
 ## Usage
-- used: 2 (tracking started 2026-07-13)
+- used: 0 (tracking started 2026-07-13)
 - last used: 2026-07-16
 
 ## Steps

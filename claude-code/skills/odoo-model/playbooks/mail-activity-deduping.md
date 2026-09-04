@@ -5,7 +5,7 @@ Applies when: a stored compute repeatedly schedules mail.activity warnings, and 
 Called by: [implement-model](implement-model.md), [implement-notification](implement-notification.md)
 
 ## Usage
-- used: 1
+- used: 0
 - last used: 2026-07-10
 
 ## Steps

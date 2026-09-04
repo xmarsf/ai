@@ -8,7 +8,7 @@ Entry point: [SKILL.md](../SKILL.md)
 Called by: [implement-model](implement-model.md), [implement-wizard](implement-wizard.md), [implement-controller](implement-controller.md), [implement-view](../../odoo-view/playbooks/implement-view.md), [xml-debug](../../odoo-debug/playbooks/xml-debug.md)
 
 ## Usage
-- used: 1 (tracking started 2026-07-13)
+- used: 0 (tracking started 2026-07-13)
 - last used: 2026-07-16
 
 ## Steps

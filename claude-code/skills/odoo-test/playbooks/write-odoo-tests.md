@@ -8,7 +8,7 @@ cases, **case selection**, **placement**, and **type** decisions before any test
 Entry point: [SKILL.md](../SKILL.md), [the odoo skill](../../odoo/SKILL.md)
 
 ## Usage
-- used: 6
+- used: 0
 - last used: 2026-07-19
 
 ## Steps

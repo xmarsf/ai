@@ -6,7 +6,7 @@ Entry point: [SKILL.md](../SKILL.md)
 Called by: [implement-model](implement-model.md), [implement-wizard](implement-wizard.md)
 
 ## Usage
-- used: 3
+- used: 0
 - last used: 2026-07-21
 
 ## Steps

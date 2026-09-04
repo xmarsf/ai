@@ -5,7 +5,7 @@ Applies when: selecting or customizing widgets for specific field types in views
 Called by: [inherit-view](inherit-view.md), [implement-view](implement-view.md)
 
 ## Usage
-- used: 1
+- used: 0
 - last used: 2026-07-10
 
 ## Steps

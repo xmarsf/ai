@@ -6,7 +6,7 @@ implementation. Classify scope/risk, split work, choose tests, and match playboo
 Entry point: [SKILL.md](../SKILL.md)
 
 ## Usage
-- used: 21
+- used: 0
 - last used: 2026-07-22
 
 ## Steps

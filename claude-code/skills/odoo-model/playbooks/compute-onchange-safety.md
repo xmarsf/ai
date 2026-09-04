@@ -5,7 +5,7 @@ Applies when: the planned diff adds or edits a compute/onchange whose value must
 Called by: [implement-model](implement-model.md), [implement-automation](implement-automation.md)
 
 ## Usage
-- used: 1
+- used: 0
 - last used: 2026-07-10
 
 ## Steps

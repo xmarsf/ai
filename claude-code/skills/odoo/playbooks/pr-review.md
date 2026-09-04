@@ -7,7 +7,7 @@ separately asks for code changes.
 Entry point: [SKILL.md](../SKILL.md)
 
 ## Usage
-- used: 4
+- used: 0
 - last used: 2026-07-22
 
 ## Steps

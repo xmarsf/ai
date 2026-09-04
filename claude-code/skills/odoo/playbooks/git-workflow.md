@@ -7,7 +7,7 @@ asks in this session.**
 Entry point: [SKILL.md](../SKILL.md)
 
 ## Usage
-- used: 5 (tracking started 2026-07-10)
+- used: 0 (tracking started 2026-07-10)
 - last used: 2026-07-17
 
 ## Repo layout

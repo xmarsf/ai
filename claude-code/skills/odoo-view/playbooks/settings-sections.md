@@ -5,7 +5,7 @@ Applies when: adding new sections to the Settings page (Odoo > Settings or in a 
 Parent playbook: [create-settings-page](create-settings-page.md) — returning sub-step; resume the next parent step after this checklist.
 
 ## Usage
-- used: 1
+- used: 0
 - last used: 2026-07-10
 
 ## Steps

@@ -8,7 +8,7 @@ Entry point: [SKILL.md](../SKILL.md)
 Called by: [implement-model](implement-model.md)
 
 ## Usage
-- used: 2 (tracking started 2026-07-13)
+- used: 0 (tracking started 2026-07-13)
 - last used: 2026-07-16
 
 ## Steps
