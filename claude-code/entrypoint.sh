@@ -8,9 +8,9 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 # /home/node mount), so anything installed at image-build time is
 # shadowed at runtime. Install/update skills here instead, on every
 # start, same reasoning as rtk above.
-claude plugin marketplace add JuliusBrussee/caveman -y || true
+claude plugin marketplace add JuliusBrussee/caveman || true
 claude plugin install caveman@caveman -y || true
-claude plugin marketplace add anthropics/claude-plugins-official -y || true
+claude plugin marketplace add anthropics/claude-plugins-official || true
 claude plugin install superpowers@claude-plugins-official -y || true
 
 exec "$@"
