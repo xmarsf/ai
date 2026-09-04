@@ -64,34 +64,12 @@ Swap `CLAUDE.odoo.md` for whatever memory file fits the project, or drop that mo
 
 `:ro` = container can't corrupt host files, and can't self-install skills. Drop it to allow writes back. Mount each `@import`ed file separately — imports resolve as paths, an unmounted one silently resolves to nothing.
 
-### Plugins (marketplace skills)
+### Recommended plugins (marketplace skills)
 
-Never bind-mount host `~/.claude/plugins` — its `installPath` values point at your host home, which doesn't exist in the container (also often 1GB+). Instead, give plugins their own named volume and seed it from inside a container:
+- [anthropics/claude-plugins](https://github.com/anthropics/claude-plugins) — official marketplace (includes `superpowers`)
+- [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) — third-party marketplace (`caveman`)
 
-```bash
-docker volume create claude-plugins
-mkdir -p $HOME/.claude-docker && [ -f $HOME/.claude-docker/settings.json ] || echo '{}' > $HOME/.claude-docker/settings.json
-
-docker run --rm \
-  -v claude-plugins:/home/node/.claude/plugins \
-  -v $HOME/.claude-docker/settings.json:/home/node/.claude/settings.json \
-  --cap-drop=ALL \
-  claude-code bash -lc '
-    claude plugin marketplace add JuliusBrussee/caveman
-    claude plugin install -y caveman@caveman
-    claude plugin install -y superpowers@claude-plugins-official
-  '
-```
-
-Superpowers is on the official marketplace already known to `claude` — no `marketplace add` needed, only caveman's third-party one. Safe to re-run — installed plugins are skipped. Order vs. step 2 doesn't matter, volume just needs seeding before use.
-
-Monorepo marketplace clones the whole repo — sparse-checkout to keep it small:
-
-```bash
-claude plugin marketplace add anthropics/claude-plugins --sparse .claude-plugin plugins
-```
-
-`settings.json` must be mounted **read-write** (no `:ro`) for plugin installs — `plugin install` writes `enabledPlugins`/`extraKnownMarketplaces` into it. Keep it at `$HOME/.claude-docker/settings.json` (container-specific — host `settings.json` has host-only hook paths that won't resolve in the container). Optional if you never install marketplace plugins.
+Install manually later inside the container (`claude plugin marketplace add ...` / `claude plugin install ...`).
 
 To run host hooks too: `-v $HOME/.claude/hooks:/home/node/.claude/hooks:ro`, and point hook commands at `node /home/node/.claude/hooks/<script>.js` (container `PATH` already has `node`).
 
