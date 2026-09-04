@@ -66,10 +66,10 @@ Swap `CLAUDE.odoo.md` for whatever memory file fits the project, or drop that mo
 
 ### Recommended plugins (marketplace skills)
 
-- [anthropics/claude-plugins](https://github.com/anthropics/claude-plugins) — official marketplace (includes `superpowers`)
+- [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official) — official marketplace (includes `superpowers`)
 - [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) — third-party marketplace (`caveman`)
 
-Install manually later inside the container (`claude plugin marketplace add ...` / `claude plugin install ...`).
+Both auto-installed/updated by `entrypoint.sh` on every container start (needs a writable `~/.claude/plugins`, e.g. the `claude-plugins` volume above).
 
 To run host hooks too: `-v $HOME/.claude/hooks:/home/node/.claude/hooks:ro`, and point hook commands at `node /home/node/.claude/hooks/<script>.js` (container `PATH` already has `node`).
 
