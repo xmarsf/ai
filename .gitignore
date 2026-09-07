@@ -160,6 +160,5 @@ cython_debug/
 #.idea/
 .idea
 .vscode
-.claude
 .worktrees/
 tools/claude-code/script-z-ai
