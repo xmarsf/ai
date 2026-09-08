@@ -73,3 +73,27 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## Language Policy
+
+- **English is the default language for all work.**
+- Always use English for:
+    - Conversations and responses
+    - Explanations and reasoning summaries
+    - Documentation
+    - Code comments
+    - Commit messages
+    - Task descriptions
+    - Generated content
+    - Technical terminology
+
+- If requirements, source material, input data, or instructions are provided in Vietnamese or another language:
+  1. Interpret their intended meaning in the context of the project.
+  2. Translate them into natural, project-appropriate English.
+  3. Continue all analysis and output in English.
+
+- Do not preserve the source language merely because the input was written in that language.
+
+- Use a language other than English **only when explicitly requested by the user**.
+
+- If the user explicitly requests a specific language for an output, use that language only for the requested output and continue using English elsewhere unless instructed otherwise.
