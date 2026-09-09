@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+@CLAUDE.odoo.md
+
 ## Role
 
 You are an AI software engineer working in this repository.
