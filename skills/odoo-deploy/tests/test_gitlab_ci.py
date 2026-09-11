@@ -1245,3 +1245,128 @@ def test_check_h_times_out_without_delivery(monkeypatch, tmp_path):
     ok, detail = gitlab_ci._check_h(
         sleep_fn=lambda s: clock.__setitem__("t", clock["t"] + s), now_fn=lambda: clock["t"])
     assert ok is False and "15s" in detail
+
+
+def _stub_all_checks(monkeypatch, ok=True):
+    for check_id in "abcdefg":
+        monkeypatch.setattr(gitlab_ci, f"_check_{check_id}", lambda: (ok, "ok" if ok else "bad"))
+    monkeypatch.setattr(gitlab_ci, "_check_h", lambda **kw: (ok, "ok" if ok else "bad"))
+
+
+def test_run_checks_skips_h_when_a_fails(monkeypatch):
+    monkeypatch.setattr(gitlab_ci, "_check_a", lambda: (False, "no config"))
+    for check_id in "bcdefg":
+        monkeypatch.setattr(gitlab_ci, f"_check_{check_id}", lambda: (True, "ok"))
+    called = {"h": False}
+    monkeypatch.setattr(gitlab_ci, "_check_h", lambda **kw: called.__setitem__("h", True) or (True, "ok"))
+
+    result = gitlab_ci._run_checks()
+
+    assert result["ok"] is False
+    assert called["h"] is False
+    h_row = next(c for c in result["checks"] if c["id"] == "h")
+    assert h_row["ok"] is False and "skipped" in h_row["detail"]
+
+
+def test_run_checks_all_ok(monkeypatch):
+    _stub_all_checks(monkeypatch, ok=True)
+    result = gitlab_ci._run_checks()
+    assert result["ok"] is True
+    assert all(c["fix"] is None for c in result["checks"])
+
+
+def test_cmd_check_setup_exits_11_on_failure(monkeypatch, capsys):
+    _stub_all_checks(monkeypatch, ok=False)
+    try:
+        gitlab_ci.cmd_check_setup()
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert e.code == 11
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+def test_cmd_check_setup_returns_ok(monkeypatch):
+    _stub_all_checks(monkeypatch, ok=True)
+    assert gitlab_ci.cmd_check_setup()["ok"] is True
+
+
+def test_cmd_setup_missing_required_env_exits_11(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(gitlab_ci, "skill_dir", lambda: tmp_path)
+    (tmp_path / "docker").mkdir()
+    monkeypatch.setattr(gitlab_ci, "load_project_config",
+                         lambda: {"git_root": "/repo", "gitlab_url": "https://gitlab.vdx.vn"})
+    try:
+        gitlab_ci.cmd_setup()
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert e.code == 11
+
+
+def test_cmd_setup_fills_missing_keys_and_creates_hook(monkeypatch, tmp_path):
+    monkeypatch.setattr(gitlab_ci, "skill_dir", lambda: tmp_path)
+    monkeypatch.setattr(gitlab_ci, "events_dir", lambda: tmp_path / "docker" / "events")
+    docker_dir = tmp_path / "docker"
+    docker_dir.mkdir()
+    gitlab_ci._write_env_file(docker_dir / ".env",
+                               {"TUNNEL_TOKEN": "tok", "HOOK_HOSTNAME": "x.vdx.vn"})
+    monkeypatch.setattr(gitlab_ci, "load_project_config",
+                         lambda: {"git_root": "/repo", "gitlab_url": "https://gitlab.vdx.vn"})
+    monkeypatch.setattr(gitlab_ci, "resolve_gitlab_token", lambda host: "TOK")
+    monkeypatch.setattr(gitlab_ci, "git_remote_project_path",
+                         lambda remote, root: {"origin": "truong/sca", "upstream": "sungroup/sca"}[remote])
+    monkeypatch.setattr(gitlab_ci, "gitlab_project_id",
+                         lambda token, url, path: {"truong/sca": 90, "sungroup/sca": 21}[path])
+    monkeypatch.setattr(gitlab_ci.subprocess, "run",
+                         lambda args, **kw: subprocess.CompletedProcess(args, 0, stdout="", stderr=""))
+    api_calls = []
+
+    def fake_api_request(token, method, url, data=None, **kw):
+        api_calls.append((method, url, data))
+        if method == "GET":
+            return []
+        return {"id": 9}
+
+    monkeypatch.setattr(gitlab_ci, "api_request", fake_api_request)
+    monkeypatch.setattr(gitlab_ci, "_run_checks", lambda: {"ok": True, "checks": []})
+
+    result = gitlab_ci.cmd_setup()
+
+    env = gitlab_ci._read_env_file(docker_dir / ".env")
+    assert set(gitlab_ci.ENV_AUTO) <= env.keys()
+    assert result["hook"] == "created"
+    assert result["hook_id"] == 9
+    assert sorted(result["env_added"]) == sorted(gitlab_ci.ENV_AUTO)
+    post_calls = [c for c in api_calls if c[0] == "POST"]
+    assert len(post_calls) == 1
+    assert post_calls[0][2]["pipeline_events"] is True
+    assert post_calls[0][2]["push_events"] is False
+
+
+def test_cmd_setup_updates_existing_hook(monkeypatch, tmp_path):
+    monkeypatch.setattr(gitlab_ci, "skill_dir", lambda: tmp_path)
+    monkeypatch.setattr(gitlab_ci, "events_dir", lambda: tmp_path / "docker" / "events")
+    docker_dir = tmp_path / "docker"
+    docker_dir.mkdir()
+    gitlab_ci._write_env_file(docker_dir / ".env", {k: "x" for k in gitlab_ci.ENV_ALL_KEYS})
+    monkeypatch.setattr(gitlab_ci, "load_project_config",
+                         lambda: {"git_root": "/repo", "gitlab_url": "https://gitlab.vdx.vn"})
+    monkeypatch.setattr(gitlab_ci, "resolve_gitlab_token", lambda host: "TOK")
+    monkeypatch.setattr(gitlab_ci, "git_remote_project_path",
+                         lambda remote, root: {"origin": "truong/sca", "upstream": "sungroup/sca"}[remote])
+    monkeypatch.setattr(gitlab_ci, "gitlab_project_id",
+                         lambda token, url, path: {"truong/sca": 90, "sungroup/sca": 21}[path])
+    monkeypatch.setattr(gitlab_ci.subprocess, "run",
+                         lambda args, **kw: subprocess.CompletedProcess(args, 0, stdout="", stderr=""))
+
+    def fake_api_request(token, method, url, data=None, **kw):
+        if method == "GET":
+            return [{"id": 5, "url": "https://x/hook"}]
+        return {}
+
+    monkeypatch.setattr(gitlab_ci, "api_request", fake_api_request)
+    monkeypatch.setattr(gitlab_ci, "_run_checks", lambda: {"ok": True, "checks": []})
+
+    result = gitlab_ci.cmd_setup()
+    assert result["hook"] == "updated"
+    assert result["hook_id"] == 5
+    assert result["env_added"] == []
