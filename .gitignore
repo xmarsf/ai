@@ -162,3 +162,4 @@ cython_debug/
 .vscode
 .worktrees/
 tools/claude-code/script-z-ai
+skills/odoo-deploy/docker/events/

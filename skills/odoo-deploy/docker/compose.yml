@@ -1,0 +1,20 @@
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:2025.9.1
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+
+  listener:
+    image: python:3.12-slim
+    restart: unless-stopped
+    user: "${LISTENER_UID}:${LISTENER_GID}"
+    environment:
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      FORK_PROJECT_ID: ${FORK_PROJECT_ID}
+      EVENTS_DIR: /events
+    volumes:
+      - ./listener.py:/listener.py:ro
+      - ./events:/events
+    command: ["python3", "/listener.py"]
