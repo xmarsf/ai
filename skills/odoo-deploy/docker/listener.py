@@ -49,16 +49,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        self._record_delivery()
+        # Store the real event first: a failure writing the delivery marker
+        # (only check `h` reads it) must not cost a pipeline event.
         self._store_event(body)
+        self._record_delivery()
         self.send_response(200)
         self.end_headers()
 
     def _record_delivery(self) -> None:
         EVENTS_DIR.mkdir(parents=True, exist_ok=True)
         marker = EVENTS_DIR / ".last_delivery"
-        tmp = marker.with_suffix(".tmp")
-        tmp.write_text(str(time.time_ns()), encoding="utf-8")
+        # Unique per request: ThreadingHTTPServer serves concurrent deliveries,
+        # and a shared tmp name lets one thread's os.replace consume another's.
+        received_ns = time.time_ns()
+        tmp = EVENTS_DIR / f".last_delivery.{received_ns}.tmp"
+        tmp.write_text(str(received_ns), encoding="utf-8")
         os.replace(tmp, marker)
 
     def _store_event(self, body: bytes) -> None:

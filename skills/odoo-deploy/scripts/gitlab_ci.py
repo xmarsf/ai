@@ -25,9 +25,14 @@ from pathlib import Path
 
 # Some GitLab/WAF deployments reject the default Python-urllib agent with 403.
 USER_AGENT = "odoo-deploy/1.0"
-RETRY_STATUSES = {429, 500, 502, 503, 504}
 RETRY_BACKOFFS = (2, 5)  # seconds before attempt 2, then attempt 3
 REQUIRED_CONFIG_KEYS = ("git_root", "gitlab_url")
+
+
+def retryable_status(code: int) -> bool:
+    """429 plus the whole 5xx range — GitLab may sit behind Cloudflare, whose
+    520-527 errors are transient too."""
+    return code == 429 or 500 <= code < 600
 
 
 def skill_dir() -> Path:
@@ -72,12 +77,17 @@ def parse_remote_url(url: str) -> tuple[str, str]:
     return match.group(1), match.group(2)
 
 
-def git_remote_project_path(remote: str, git_root: str) -> str | None:
-    result = subprocess.run(["git", "remote", "get-url", remote],
-                             cwd=git_root, capture_output=True, text=True)
-    if result.returncode != 0:
-        return None
-    _host, project_path = parse_remote_url(result.stdout.strip())
+def _git_remote_url(remote: str, git_root: str) -> str | None:
+    result = subprocess.run(["git", "remote", "get-url", remote], cwd=git_root,
+                             capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def git_remote_project_path(remote: str, git_root: str) -> str:
+    url = _git_remote_url(remote, git_root)
+    if url is None:
+        raise SystemExit(f"error: no '{remote}' git remote in {git_root}")
+    _host, project_path = parse_remote_url(url)
     return project_path
 
 
@@ -131,7 +141,7 @@ def api_request(token: str, method: str, url: str, data: dict | None = None,
                 raw = resp.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
-            if idempotent and e.code in RETRY_STATUSES and attempts < len(RETRY_BACKOFFS):
+            if idempotent and retryable_status(e.code) and attempts < len(RETRY_BACKOFFS):
                 time.sleep(RETRY_BACKOFFS[attempts])
                 attempts += 1
                 continue
@@ -320,7 +330,7 @@ def api_request_raw(token: str, url: str, timeout: int = 60) -> bytes:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
-            if e.code in RETRY_STATUSES and attempts < len(RETRY_BACKOFFS):
+            if retryable_status(e.code) and attempts < len(RETRY_BACKOFFS):
                 time.sleep(RETRY_BACKOFFS[attempts])
                 attempts += 1
                 continue
@@ -373,14 +383,17 @@ def cmd_fetch_logs(project_id: int, pipeline_id: int, out_dir: str) -> dict:
             continue
         trace_raw = api_request_raw(
             token, f"{gitlab_url}/api/v4/projects/{project_id}/jobs/{job['id']}/trace")
-        trace_path = out / f"{job['name']}.log"
+        # `parallel:` jobs are named e.g. "parallel-odoo-pytest 1/3" — the '/'
+        # would make this a path, so only the manifest keeps the real name.
+        safe_name = re.sub(r"[^\w.\-]+", "_", job["name"])
+        trace_path = out / f"{safe_name}.log"
         trace_path.write_text(_clean_trace(trace_raw), encoding="utf-8")
 
         artifacts = None
         if any(a.get("file_type") == "archive" for a in job.get("artifacts") or []):
             zip_bytes = api_request_raw(
                 token, f"{gitlab_url}/api/v4/projects/{project_id}/jobs/{job['id']}/artifacts")
-            artifacts_dir = out / job["name"]
+            artifacts_dir = out / safe_name
             _safe_extract(zip_bytes, artifacts_dir)
             artifacts = str(artifacts_dir)
 
@@ -414,9 +427,14 @@ def _yaml_scalar(text: str, key: str) -> str | None:
 
 
 def rewrite_ruff_ignore(ruff_toml_text: str, ignore_linters: str) -> str:
-    """Replace the `extend-exclude` line to match CI's own
-    scripts/utils.sh get_ignore_file_command_ruff — confirmed against the
-    real script in Step 3 above."""
+    """Replace the `extend-exclude` line to approximate what CI's own
+    scripts/utils.sh does with IGNORE_LINTERS.
+
+    Best effort, NOT verified: the real `get_ignore_file_command_ruff` shell
+    function lives in the `infra/cicd-pipeline-template` GitLab project's
+    `scripts/utils.sh`, which was never readable from where this was written.
+    Read that function and confirm the transform matches before trusting
+    these findings to mirror CI's."""
     modules = [m.strip() for m in ignore_linters.split(",") if m.strip()]
     patterns = ", ".join(f'"{m}/**"' for m in modules)
     replacement = f"extend-exclude = [{patterns}]"
@@ -430,7 +448,10 @@ def rewrite_ruff_ignore(ruff_toml_text: str, ignore_linters: str) -> str:
 def cmd_lint(target: str = "dev") -> dict:
     cfg = load_project_config()
     git_root, gitlab_url = cfg["git_root"], cfg["gitlab_url"]
-    addons_dir = cfg["addons_dir"]
+    addons_dir = cfg.get("addons_dir")
+    if not addons_dir:
+        raise SystemExit("error: config/project.json is missing 'addons_dir'; "
+                          "run 'odoo setup --force' (odoo-cli)")
     token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
     upstream_path = git_remote_project_path("upstream", git_root)
     upstream_id = gitlab_project_id(token, gitlab_url, upstream_path)
@@ -476,9 +497,12 @@ def cmd_lint(target: str = "dev") -> dict:
             raise SystemExit(f"error: ruff output was not valid JSON: {e}")
     finally:
         tmp_config.unlink(missing_ok=True)
-    changed = set(subprocess.run(
-        ["git", "diff", "--name-only", f"upstream/{target}...HEAD"],
-        cwd=git_root, capture_output=True, text=True).stdout.splitlines())
+    diff = subprocess.run(["git", "diff", "--name-only", f"upstream/{target}...HEAD"],
+                           cwd=git_root, capture_output=True, text=True)
+    if diff.returncode != 0:
+        raise SystemExit(f"error: cannot resolve upstream/{target}; "
+                          f"run 'git fetch upstream {target}' first")
+    changed = set(diff.stdout.splitlines())
 
     findings = [{"file": f["filename"], "line": f["location"]["row"], "rule": f["code"],
                  "message": f["message"],
@@ -521,6 +545,8 @@ def cmd_notify(text: str) -> dict:
         return {"telegram": f"failed: HTTP {e.code}"}
     except (urllib.error.URLError, TimeoutError) as e:
         return {"telegram": f"failed: {e}"}
+    except json.JSONDecodeError as e:
+        return {"telegram": f"failed: invalid JSON response: {e}"}
     if not result.get("ok"):
         return {"telegram": f"failed: {result.get('description', result)}"}
     return {"telegram": "sent"}
@@ -575,18 +601,14 @@ def _write_env_file(path: Path, env: dict) -> None:
     path.chmod(0o600)
 
 
-def _git_remote_url(remote: str, git_root: str) -> str | None:
-    result = subprocess.run(["git", "remote", "get-url", remote], cwd=git_root,
-                             capture_output=True, text=True)
-    return result.stdout.strip() if result.returncode == 0 else None
-
-
 def _check_a() -> tuple[bool, str]:
     try:
         cfg = load_project_config()
     except SystemExit as e:
         return False, str(e.code)
     git_root, gitlab_url = cfg["git_root"], cfg["gitlab_url"]
+    if not cfg.get("addons_dir"):
+        return False, "config/project.json is missing 'addons_dir'"
     origin_url = _git_remote_url("origin", git_root)
     if origin_url is None:
         return False, f"no 'origin' git remote in {git_root}"
@@ -690,22 +712,25 @@ def _check_g() -> tuple[bool, str]:
 
 
 def _check_h(sleep_fn=time.sleep, now_fn=time.time) -> tuple[bool, str]:
-    cfg = load_project_config()
-    gitlab_url = cfg["gitlab_url"]
-    token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
-    upstream_id = gitlab_project_id(token, gitlab_url,
-                                     git_remote_project_path("upstream", cfg["git_root"]))
-    env = _read_env_file(skill_dir() / "docker" / ".env")
-    hook_url = f"https://{env.get('HOOK_HOSTNAME')}/hook"
-    hooks = api_request(token, "GET", f"{gitlab_url}/api/v4/projects/{upstream_id}/hooks")
-    hook = next((h for h in hooks if h.get("url") == hook_url), None)
-    if hook is None:
-        return False, f"no hook at {hook_url} to test"
+    try:
+        cfg = load_project_config()
+        gitlab_url = cfg["gitlab_url"]
+        token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
+        upstream_id = gitlab_project_id(token, gitlab_url,
+                                         git_remote_project_path("upstream", cfg["git_root"]))
+        env = _read_env_file(skill_dir() / "docker" / ".env")
+        hook_url = f"https://{env.get('HOOK_HOSTNAME')}/hook"
+        hooks = api_request(token, "GET", f"{gitlab_url}/api/v4/projects/{upstream_id}/hooks")
+        hook = next((h for h in hooks if h.get("url") == hook_url), None)
+        if hook is None:
+            return False, f"no hook at {hook_url} to test"
 
-    marker_path = events_dir() / ".last_delivery"
-    before = marker_path.read_text(encoding="utf-8") if marker_path.is_file() else None
-    api_request(token, "POST", f"{gitlab_url}/api/v4/projects/{upstream_id}"
-                                f"/hooks/{hook['id']}/test/pipeline_events")
+        marker_path = events_dir() / ".last_delivery"
+        before = marker_path.read_text(encoding="utf-8") if marker_path.is_file() else None
+        api_request(token, "POST", f"{gitlab_url}/api/v4/projects/{upstream_id}"
+                                    f"/hooks/{hook['id']}/test/pipeline_events")
+    except SystemExit as e:
+        return False, str(e.code)
 
     deadline = now_fn() + 15
     while now_fn() < deadline:
@@ -726,7 +751,9 @@ CHECK_FIXES = {
          "the missing origin/upstream git remote",
     "b": "add a ~/.gitlab [gitlab] entry or run 'git credential approve' with a working token",
     "c": "see README 'Cloudflare tunnel', then re-run 'gitlab_ci.py setup'",
-    "d": "run 'docker compose -f skills/odoo-deploy/docker/compose.yml up -d'",
+    "d": "run 'gitlab_ci.py setup' (brings the compose stack up); if it's "
+         "crash-looping, check 'docker compose logs' — usually a bad TUNNEL_TOKEN "
+         "or missing WEBHOOK_SECRET/FORK_PROJECT_ID in .env",
     "e": "run 'gitlab_ci.py setup' to (re)create the pipeline-events hook",
     "f": "install uv (https://docs.astral.sh/uv/) so 'uvx' is on PATH",
     "g": "run 'odoo setup --force --setup-telegram' (odoo-cli)",
@@ -939,6 +966,10 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(e.code, int):
             return e.code
         print(str(e.code), file=sys.stderr)
+        return 10
+    except Exception as e:
+        # A crash is a tooling error (10), never a red pipeline (1).
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
         return 10
     print(json.dumps(result, ensure_ascii=False))
     if args.cmd == "wait":

@@ -83,12 +83,16 @@ def test_git_remote_project_path_reads_git_remote(monkeypatch):
     assert seen["cwd"] == "/repo"
 
 
-def test_git_remote_project_path_none_when_remote_missing(monkeypatch):
+def test_git_remote_project_path_exits_when_remote_missing(monkeypatch):
     def fake_run(args, **kwargs):
         return subprocess.CompletedProcess(args, 1, stdout="", stderr="error: No such remote")
 
     monkeypatch.setattr(gitlab_ci.subprocess, "run", fake_run)
-    assert gitlab_ci.git_remote_project_path("upstream", "/repo") is None
+    try:
+        gitlab_ci.git_remote_project_path("upstream", "/repo")
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert "no 'upstream' git remote" in str(e.code)
 
 
 GITLAB_INI = "[gitlab]\nhttps://gitlab.vdx.vn/ = FILETOKEN\n"
@@ -487,6 +491,14 @@ def test_main_passes_through_int_systemexit(monkeypatch):
     assert gitlab_ci.main(["push"]) == 4
 
 
+def test_main_wraps_unexpected_exception_as_10(monkeypatch, capsys):
+    monkeypatch.setattr(gitlab_ci, "cmd_wait", lambda **kw: (_ for _ in ()).throw(
+        ValueError("boom")))
+    code = gitlab_ci.main(["wait", "--mr", "7", "--sha", "abc"])
+    assert code == 10  # a crash is a tooling error, never 1 ("pipeline failed")
+    assert "ValueError: boom" in capsys.readouterr().err
+
+
 def _wait_env(monkeypatch, gets):
     """`gets` maps exact URL -> response dict; api_request(GET, url) looks it
     up. Any POST/other method is an error — wait never writes."""
@@ -788,6 +800,31 @@ def test_cmd_fetch_logs_no_archive_artifacts_is_null(monkeypatch, tmp_path):
     assert result["jobs"][0]["artifacts"] is None
 
 
+def test_cmd_fetch_logs_sanitizes_job_name_with_slash(monkeypatch, tmp_path):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("report.log", "FAILED some::test\n")
+    zip_bytes = buf.getvalue()
+
+    def fake_raw(token, url):
+        return zip_bytes if url.endswith("/artifacts") else b"trace\n"
+
+    _fetch_logs_env(monkeypatch, jobs=[
+        {"id": 1, "name": "parallel-odoo-pytest 1/3", "stage": "test", "status": "failed",
+         "allow_failure": False, "failure_reason": "script_failure",
+         "artifacts": [{"file_type": "archive", "filename": "artifacts.zip"}]},
+    ], raw=fake_raw)
+
+    result = gitlab_ci.cmd_fetch_logs(project_id=21, pipeline_id=55, out_dir=str(tmp_path))
+
+    # The filesystem gets a sanitized name; the manifest keeps GitLab's real one.
+    assert result["jobs"][0]["job"] == "parallel-odoo-pytest 1/3"
+    assert result["jobs"][0]["trace"] == str(tmp_path / "parallel-odoo-pytest_1_3.log")
+    assert (tmp_path / "parallel-odoo-pytest_1_3.log").read_text(encoding="utf-8") == "trace\n"
+    assert result["jobs"][0]["artifacts"] == str(tmp_path / "parallel-odoo-pytest_1_3")
+    assert (tmp_path / "parallel-odoo-pytest_1_3" / "report.log").is_file()
+
+
 def test_safe_extract_rejects_zip_slip(tmp_path):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -952,6 +989,28 @@ def test_cmd_lint_ruff_invalid_json_exits_10(monkeypatch):
         assert "json" in e.code.lower()
 
 
+def test_cmd_lint_unresolvable_upstream_ref_exits_10(monkeypatch):
+    _lint_env(monkeypatch, ci_yaml='variables:\n  ENABLE_RUFF: "true"\n')
+
+    def fake_run(args, cwd=None, capture_output=None, text=None, check=None, **kw):
+        if args[0] == "uvx":
+            return subprocess.CompletedProcess(args, 0, stdout="[]", stderr="")
+        if args[:2] == ["git", "diff"]:
+            # a fresh clone that never fetched upstream/dev: git exits 128, empty stdout
+            return subprocess.CompletedProcess(
+                args, 128, stdout="", stderr="fatal: ambiguous argument 'upstream/dev...HEAD'")
+        raise AssertionError(f"unexpected subprocess call: {args}")
+
+    monkeypatch.setattr(gitlab_ci.subprocess, "run", fake_run)
+
+    try:
+        gitlab_ci.cmd_lint(target="dev")
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert isinstance(e.code, str)  # message-only exit -> 10, not silent in_branch: false
+        assert "git fetch upstream dev" in e.code
+
+
 def test_cmd_retry_job(monkeypatch):
     def fake_api_request(token, method, url, data=None, **kw):
         assert method == "POST"
@@ -1055,7 +1114,8 @@ def _checks_env(monkeypatch, tmp_path, git_root="/repo", gitlab_url="https://git
         "origin": "https://gitlab.vdx.vn/truong/sca.git",
         "upstream": "https://gitlab.vdx.vn/sungroup/sca",
     }
-    cfg = {"git_root": git_root, "gitlab_url": gitlab_url}
+    cfg = {"git_root": git_root, "gitlab_url": gitlab_url,
+           "addons_dir": git_root + "/addons"}
     if telegram:
         cfg.update(telegram)
 
