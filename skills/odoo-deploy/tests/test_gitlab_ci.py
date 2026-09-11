@@ -484,3 +484,136 @@ def test_main_wraps_message_only_systemexit_as_10(monkeypatch, capsys):
 def test_main_passes_through_int_systemexit(monkeypatch):
     monkeypatch.setattr(gitlab_ci, "cmd_push", lambda **kw: (_ for _ in ()).throw(SystemExit(4)))
     assert gitlab_ci.main(["push"]) == 4
+
+
+def _wait_env(monkeypatch, gets):
+    """`gets` maps exact URL -> response dict; api_request(GET, url) looks it
+    up. Any POST/other method is an error — wait never writes."""
+    def fake_api_request(token, method, url, data=None, **kw):
+        assert method == "GET"
+        return gets[url]
+
+    monkeypatch.setattr(gitlab_ci, "api_request", fake_api_request)
+    monkeypatch.setattr(gitlab_ci, "resolve_gitlab_token", lambda host: "TOK")
+    monkeypatch.setattr(gitlab_ci, "git_remote_project_path", lambda remote, root: "sungroup/sca")
+    monkeypatch.setattr(gitlab_ci, "gitlab_project_id", lambda token, url, path: 21)
+    monkeypatch.setattr(gitlab_ci, "load_project_config",
+                         lambda: {"git_root": "/repo", "gitlab_url": "https://gitlab.vdx.vn"})
+
+
+def _write_event(events_root, project_id, pipeline_id, received_ns, iid, sha, status):
+    d = events_root / str(project_id) / str(pipeline_id)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{received_ns}.json").write_text(json.dumps({
+        "object_kind": "pipeline",
+        "object_attributes": {"id": pipeline_id, "sha": sha, "status": status},
+        "merge_request": {"iid": iid, "source_project_id": 90},
+        "project": {"id": project_id},
+    }), encoding="utf-8")
+
+
+def test_cmd_wait_initial_get_counting_status(monkeypatch):
+    mr_url = "https://gitlab.vdx.vn/api/v4/projects/21/merge_requests/7"
+    _wait_env(monkeypatch, {mr_url: {
+        "head_pipeline": {"id": 55, "project_id": 21, "sha": "abc",
+                           "status": "success", "web_url": "https://x/p/55",
+                           "finished_at": "2026-09-11T10:00:00.000Z"}}})
+
+    result = gitlab_ci.cmd_wait(mr_iid=7, sha="abc")
+    assert result == {"pipeline_id": 55, "project_id": 21,
+                       "status": "success", "web_url": "https://x/p/55"}
+
+
+def test_cmd_wait_since_rejects_stale_final_status(monkeypatch):
+    mr_url = "https://gitlab.vdx.vn/api/v4/projects/21/merge_requests/7"
+    since = 2_000_000_000_000_000_000  # far in the future
+    _wait_env(monkeypatch, {mr_url: {
+        "head_pipeline": {"id": 55, "project_id": 21, "sha": "abc",
+                           "status": "success", "web_url": "https://x/p/55",
+                           "finished_at": "2026-09-11T10:00:00.000Z"}}})
+
+    calls = {"sleep": 0}
+
+    def sleep_and_stop(_s):
+        calls["sleep"] += 1
+        raise SystemExit(3)  # abort the loop after one pass, like a real timeout would
+
+    try:
+        gitlab_ci.cmd_wait(mr_iid=7, sha="abc", since=since, sleep_fn=sleep_and_stop, now_fn=lambda: 0)
+    except SystemExit:
+        pass
+    # since is stale relative to finished_at -> falls through to event scanning,
+    # which sleeps once before this test's injected sleep_fn aborts the loop
+    assert calls["sleep"] == 1
+
+
+def test_cmd_wait_scans_events_dir_for_final_status(monkeypatch, tmp_path):
+    monkeypatch.setattr(gitlab_ci, "events_dir", lambda: tmp_path)
+    mr_url = "https://gitlab.vdx.vn/api/v4/projects/21/merge_requests/7"
+    pipeline_url = "https://gitlab.vdx.vn/api/v4/projects/21/pipelines/55"
+    _wait_env(monkeypatch, {
+        mr_url: {"head_pipeline": {"id": 55, "project_id": 21, "sha": "old",
+                                    "status": "success", "finished_at": None}},
+        pipeline_url: {"id": 55, "status": "failed", "web_url": "https://x/p/55",
+                        "finished_at": "2026-09-11T10:00:00.000Z"},
+    })
+    _write_event(tmp_path, project_id=21, pipeline_id=55, received_ns=100,
+                 iid=7, sha="abc", status="failed")
+
+    result = gitlab_ci.cmd_wait(mr_iid=7, sha="abc", sleep_fn=lambda s: None,
+                                 now_fn=lambda: 0)
+    assert result == {"pipeline_id": 55, "project_id": 21,
+                       "status": "failed", "web_url": "https://x/p/55"}
+
+
+def test_cmd_wait_ignores_events_for_other_iid_sha_or_before_since(monkeypatch, tmp_path):
+    monkeypatch.setattr(gitlab_ci, "events_dir", lambda: tmp_path)
+    mr_url = "https://gitlab.vdx.vn/api/v4/projects/21/merge_requests/7"
+    _wait_env(monkeypatch, {mr_url: {"head_pipeline": {"sha": "old", "status": "success"}}})
+    _write_event(tmp_path, 21, 1, received_ns=50, iid=99, sha="abc", status="success")   # wrong iid
+    _write_event(tmp_path, 21, 2, received_ns=50, iid=7, sha="zzz", status="success")    # wrong sha
+    _write_event(tmp_path, 21, 3, received_ns=5, iid=7, sha="abc", status="success")     # before since
+
+    calls = {"n": 0}
+
+    def sleep_and_stop(_s):
+        calls["n"] += 1
+        raise SystemExit(3)  # abort the test after one scan pass, like a timeout would
+
+    try:
+        gitlab_ci.cmd_wait(mr_iid=7, sha="abc", since=10, sleep_fn=sleep_and_stop, now_fn=lambda: 0)
+    except SystemExit:
+        pass
+    assert calls["n"] == 1  # none of the three events matched -> kept scanning
+
+
+def test_cmd_wait_no_pipeline_after_10_minutes_exits_3(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(gitlab_ci, "events_dir", lambda: tmp_path)
+    mr_url = "https://gitlab.vdx.vn/api/v4/projects/21/merge_requests/7"
+    _wait_env(monkeypatch, {mr_url: {"head_pipeline": {"sha": "old", "status": "success"}}})
+
+    clock = {"t": 0.0}
+    try:
+        gitlab_ci.cmd_wait(mr_iid=7, sha="abc",
+                            sleep_fn=lambda s: clock.__setitem__("t", clock["t"] + s),
+                            now_fn=lambda: clock["t"])
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert e.code == 3
+    assert json.loads(capsys.readouterr().out)["reason"] == "no_pipeline"
+
+
+def test_cmd_wait_timeout_flag_exits_3(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(gitlab_ci, "events_dir", lambda: tmp_path)
+    mr_url = "https://gitlab.vdx.vn/api/v4/projects/21/merge_requests/7"
+    _wait_env(monkeypatch, {mr_url: {"head_pipeline": {"sha": "abc", "status": "running"}}})
+
+    clock = {"t": 0.0}
+    try:
+        gitlab_ci.cmd_wait(mr_iid=7, sha="abc", timeout_minutes=1,
+                            sleep_fn=lambda s: clock.__setitem__("t", clock["t"] + s),
+                            now_fn=lambda: clock["t"])
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert e.code == 3
+    assert json.loads(capsys.readouterr().out)["reason"] == "timeout"
