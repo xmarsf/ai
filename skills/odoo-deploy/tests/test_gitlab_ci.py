@@ -617,3 +617,47 @@ def test_cmd_wait_timeout_flag_exits_3(monkeypatch, tmp_path, capsys):
     except SystemExit as e:
         assert e.code == 3
     assert json.loads(capsys.readouterr().out)["reason"] == "timeout"
+
+
+def test_main_wait_success_exits_0(monkeypatch, capsys):
+    monkeypatch.setattr(gitlab_ci, "cmd_wait", lambda **kw: {
+        "pipeline_id": 55, "project_id": 21, "status": "success", "web_url": "https://x/p/55"
+    })
+    code = gitlab_ci.main(["wait", "--mr", "7", "--sha", "abc"])
+    assert code == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    assert json.loads(out[0])["status"] == "success"
+
+
+def test_main_wait_failed_exits_1(monkeypatch, capsys):
+    monkeypatch.setattr(gitlab_ci, "cmd_wait", lambda **kw: {
+        "pipeline_id": 55, "project_id": 21, "status": "failed", "web_url": "https://x/p/55"
+    })
+    code = gitlab_ci.main(["wait", "--mr", "7", "--sha", "abc"])
+    assert code == 1
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    assert json.loads(out[0])["status"] == "failed"
+
+
+def test_main_wait_canceled_exits_2(monkeypatch, capsys):
+    monkeypatch.setattr(gitlab_ci, "cmd_wait", lambda **kw: {
+        "pipeline_id": 55, "project_id": 21, "status": "canceled", "web_url": "https://x/p/55"
+    })
+    code = gitlab_ci.main(["wait", "--mr", "7", "--sha", "abc"])
+    assert code == 2
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    assert json.loads(out[0])["status"] == "canceled"
+
+
+def test_main_wait_skipped_exits_2(monkeypatch, capsys):
+    monkeypatch.setattr(gitlab_ci, "cmd_wait", lambda **kw: {
+        "pipeline_id": 55, "project_id": 21, "status": "skipped", "web_url": "https://x/p/55"
+    })
+    code = gitlab_ci.main(["wait", "--mr", "7", "--sha", "abc"])
+    assert code == 2
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    assert json.loads(out[0])["status"] == "skipped"

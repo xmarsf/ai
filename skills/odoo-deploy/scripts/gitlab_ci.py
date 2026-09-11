@@ -391,6 +391,8 @@ def main(argv: list[str] | None = None) -> int:
         print(str(e.code), file=sys.stderr)
         return 10
     print(json.dumps(result, ensure_ascii=False))
+    if args.cmd == "wait":
+        return EXIT_BY_STATUS.get(result.get("status"), 0)
     return 0
 
 
