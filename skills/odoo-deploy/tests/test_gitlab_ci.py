@@ -2,7 +2,6 @@ import io
 import json
 import subprocess
 import sys
-import time
 import urllib.error
 import zipfile
 from pathlib import Path
@@ -380,7 +379,7 @@ def test_cmd_push_refuses_protected_branch(tmp_path, monkeypatch):
 
 
 def test_cmd_push_creates_mr_with_default_title(tmp_path, monkeypatch):
-    repo, upstream_bare = _push_setup(tmp_path, monkeypatch)
+    _push_setup(tmp_path, monkeypatch)
     calls = _stub_mr_api(monkeypatch, existing=[], created={
         "iid": 7, "web_url": "https://gitlab.vdx.vn/g/p/-/merge_requests/7"})
 
@@ -399,7 +398,7 @@ def test_cmd_push_creates_mr_with_default_title(tmp_path, monkeypatch):
 
 
 def test_cmd_push_reuses_open_mr(tmp_path, monkeypatch):
-    repo, _ = _push_setup(tmp_path, monkeypatch)
+    _push_setup(tmp_path, monkeypatch)
     calls = _stub_mr_api(monkeypatch, existing=[
         {"iid": 3, "web_url": "https://gitlab.vdx.vn/g/p/-/merge_requests/3",
          "source_project_id": 90}])
@@ -422,7 +421,7 @@ def test_cmd_push_no_push_when_origin_already_at_head(tmp_path, monkeypatch):
 
 
 def test_cmd_push_rebase_conflict_exits_4(tmp_path, monkeypatch):
-    repo, upstream_bare = _push_setup(tmp_path, monkeypatch)
+    _, upstream_bare = _push_setup(tmp_path, monkeypatch)
     other = _clone(upstream_bare, tmp_path / "other")
     subprocess.run(["git", "-C", str(other), "checkout", "-q", "dev"], check=True)
     (other / "b.txt").write_text("conflicting upstream change", encoding="utf-8")
@@ -468,7 +467,7 @@ def test_cmd_push_non_fast_forward_exits_5(tmp_path, monkeypatch):
 
 
 def test_main_push_prints_one_json_line_and_exits_0(tmp_path, monkeypatch, capsys):
-    repo, _ = _push_setup(tmp_path, monkeypatch)
+    _push_setup(tmp_path, monkeypatch)
     _stub_mr_api(monkeypatch, existing=[{"iid": 3, "web_url": "https://x/3", "source_project_id": 90}])
 
     code = gitlab_ci.main(["push", "--target", "dev"])
