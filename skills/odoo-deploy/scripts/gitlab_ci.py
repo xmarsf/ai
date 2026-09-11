@@ -716,6 +716,110 @@ def _check_h(sleep_fn=time.sleep, now_fn=time.time) -> tuple[bool, str]:
     return False, "no delivery observed within 15s"
 
 
+CHECK_ORDER = ("a", "b", "c", "d", "e", "f", "g", "h")
+# Resolved by name through the module globals at call time (rather than binding
+# the function objects directly) so that tests can monkeypatch gitlab_ci._check_x.
+CHECK_FUNCS = {check_id: (lambda check_id=check_id: globals()[f"_check_{check_id}"]())
+               for check_id in "abcdefg"}
+CHECK_FIXES = {
+    "a": "run 'odoo setup' (odoo-cli) to write config/project.json, or add "
+         "the missing origin/upstream git remote",
+    "b": "add a ~/.gitlab [gitlab] entry or run 'git credential approve' with a working token",
+    "c": "see README 'Cloudflare tunnel', then re-run 'gitlab_ci.py setup'",
+    "d": "run 'docker compose -f skills/odoo-deploy/docker/compose.yml up -d'",
+    "e": "run 'gitlab_ci.py setup' to (re)create the pipeline-events hook",
+    "f": "install uv (https://docs.astral.sh/uv/) so 'uvx' is on PATH",
+    "g": "run 'odoo setup --force --setup-telegram' (odoo-cli)",
+    "h": "check the Cloudflare tunnel is running and HOOK_HOSTNAME resolves; "
+         "see README 'Troubleshooting'",
+}
+
+
+def _run_checks() -> dict:
+    checks = []
+    prerequisites_ok = True
+    for check_id in CHECK_ORDER:
+        if check_id == "h":
+            if not prerequisites_ok:
+                checks.append({"id": "h", "ok": False, "detail": "skipped (a-e not ok)",
+                               "fix": CHECK_FIXES["h"]})
+                continue
+            ok, detail = _check_h()
+        else:
+            ok, detail = CHECK_FUNCS[check_id]()
+        checks.append({"id": check_id, "ok": ok, "detail": detail,
+                       "fix": None if ok else CHECK_FIXES[check_id]})
+        if check_id in ("a", "b", "c", "d", "e") and not ok:
+            prerequisites_ok = False
+    return {"ok": all(c["ok"] for c in checks), "checks": checks}
+
+
+def cmd_check_setup() -> dict:
+    result = _run_checks()
+    if not result["ok"]:
+        print(json.dumps(result, ensure_ascii=False))
+        raise SystemExit(11)
+    return result
+
+
+def cmd_setup() -> dict:
+    cfg = load_project_config()
+    git_root, gitlab_url = cfg["git_root"], cfg["gitlab_url"]
+    env_path = skill_dir() / "docker" / ".env"
+    env = _read_env_file(env_path)
+
+    missing_required = [k for k in ENV_REQUIRED if not env.get(k)]
+    if missing_required:
+        print(json.dumps({"error": f"docker/.env missing {missing_required}; "
+                                    f"see README 'Cloudflare tunnel'"}, ensure_ascii=False))
+        raise SystemExit(11)
+
+    token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
+    added = []
+    if not env.get("WEBHOOK_SECRET"):
+        env["WEBHOOK_SECRET"] = secrets.token_urlsafe(32)
+        added.append("WEBHOOK_SECRET")
+    if not env.get("FORK_PROJECT_ID"):
+        fork_path = git_remote_project_path("origin", git_root)
+        env["FORK_PROJECT_ID"] = str(gitlab_project_id(token, gitlab_url, fork_path))
+        added.append("FORK_PROJECT_ID")
+    if not env.get("LISTENER_UID"):
+        env["LISTENER_UID"] = str(os.getuid())
+        added.append("LISTENER_UID")
+    if not env.get("LISTENER_GID"):
+        env["LISTENER_GID"] = str(os.getgid())
+        added.append("LISTENER_GID")
+
+    events_dir().mkdir(parents=True, exist_ok=True)
+    _write_env_file(env_path, env)
+
+    compose_path = skill_dir() / "docker" / "compose.yml"
+    subprocess.run(["docker", "compose", "-f", str(compose_path), "up", "-d"],
+                    check=True, capture_output=True, text=True)
+
+    upstream_path = git_remote_project_path("upstream", git_root)
+    upstream_id = gitlab_project_id(token, gitlab_url, upstream_path)
+    hook_url = f"https://{env['HOOK_HOSTNAME']}/hook"
+    hooks = api_request(token, "GET", f"{gitlab_url}/api/v4/projects/{upstream_id}/hooks")
+    existing = next((h for h in hooks if h.get("url") == hook_url), None)
+    hook_data = {"url": hook_url, "pipeline_events": True, "push_events": False,
+                 "issues_events": False, "merge_requests_events": False,
+                 "tag_push_events": False, "note_events": False, "job_events": False,
+                 "deployment_events": False, "token": env["WEBHOOK_SECRET"],
+                 "enable_ssl_verification": True}
+    if existing is None:
+        created = api_request(token, "POST", f"{gitlab_url}/api/v4/projects/{upstream_id}/hooks",
+                               data=hook_data)
+        hook_id, hook_state = created["id"], "created"
+    else:
+        api_request(token, "PUT",
+                     f"{gitlab_url}/api/v4/projects/{upstream_id}/hooks/{existing['id']}",
+                     data=hook_data)
+        hook_id, hook_state = existing["id"], "updated"
+
+    return {"hook_id": hook_id, "hook": hook_state, "env_added": added, "check": _run_checks()}
+
+
 def cmd_push(target: str = "dev", title: str | None = None, no_rebase: bool = False) -> dict:
     cfg = load_project_config()
     git_root = cfg["git_root"]
@@ -800,6 +904,9 @@ def _build_parser() -> argparse.ArgumentParser:
     clean = sub.add_parser("clean")
     clean.add_argument("--mr", type=int, required=True, dest="mr_iid")
 
+    sub.add_parser("setup")
+    sub.add_parser("check-setup")
+
     return p
 
 
@@ -822,6 +929,10 @@ def main(argv: list[str] | None = None) -> int:
             result = cmd_notify(text=args.text)
         elif args.cmd == "clean":
             result = cmd_clean(mr_iid=args.mr_iid)
+        elif args.cmd == "setup":
+            result = cmd_setup()
+        elif args.cmd == "check-setup":
+            result = cmd_check_setup()
         else:  # pragma: no cover - argparse already rejects unknown subcommands
             raise SystemExit("error: unknown command %r" % args.cmd)
     except SystemExit as e:
