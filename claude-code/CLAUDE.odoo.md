@@ -24,6 +24,7 @@ No `config/project.json` yet → run `odoo setup [--dry-run]` (odoo-cli) before 
 | Triage failing behavior, live/DB inspection | `odoo-debug` |
 | Cross-major port (17/18/19), migration scripts | `odoo-upgrade` |
 | Translation / Weblate `.po` round-trip | `odoo-wlc` |
+| Push to GitLab, open MR, drive CI to green | `odoo-deploy` |
 
 ## Version facts — never from memory
 
