@@ -682,6 +682,58 @@ def test_api_request_raw_sends_auth_and_user_agent(monkeypatch):
     assert gitlab_ci.api_request_raw("TOK", "https://x/y") == b"raw-bytes"
 
 
+def test_api_request_raw_retries_connection_error_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+    sleeps = []
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.URLError("dns failure")
+        return io.BytesIO(b"raw-data")
+
+    monkeypatch.setattr(gitlab_ci.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gitlab_ci.time, "sleep", lambda s: sleeps.append(s))
+    assert gitlab_ci.api_request_raw("TOK", "https://x/y") == b"raw-data"
+    assert calls["n"] == 3
+    assert sleeps == [2, 5]
+
+
+def test_api_request_raw_retries_5xx_and_429(monkeypatch):
+    codes = iter([503, 429])
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        try:
+            code = next(codes)
+        except StopIteration:
+            return io.BytesIO(b"success")
+        raise _http_error(req.full_url, code)
+
+    monkeypatch.setattr(gitlab_ci.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gitlab_ci.time, "sleep", lambda s: None)
+    assert gitlab_ci.api_request_raw("TOK", "https://x/y") == b"success"
+    assert calls["n"] == 3
+
+
+def test_api_request_raw_gives_up_after_retries_exhausted(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.URLError("persistent failure")
+
+    monkeypatch.setattr(gitlab_ci.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gitlab_ci.time, "sleep", lambda s: None)
+    try:
+        gitlab_ci.api_request_raw("TOK", "https://x/y")
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
+    assert calls["n"] == 3
+
+
 def test_clean_trace_strips_ansi_and_timestamp_prefix():
     raw = (b"2026-09-11T10:00:00.123456Z 00O \x1b[32mok\x1b[0m\n"
            b"2026-09-11T10:00:01.000000Z 00O+ next line\n")

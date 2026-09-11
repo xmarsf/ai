@@ -309,15 +309,25 @@ def cmd_wait(mr_iid: int, sha: str, since: int | None = None, timeout_minutes: i
 
 
 def api_request_raw(token: str, url: str, timeout: int = 60) -> bytes:
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token,
-                                                "User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except urllib.error.HTTPError as e:
-        raise SystemExit(f"error: GitLab API GET {url} returned {e.code}")
-    except (urllib.error.URLError, TimeoutError) as e:
-        raise SystemExit(f"error: GitLab API GET {url} unreachable: {e}")
+    headers = {"Authorization": "Bearer " + token, "User-Agent": USER_AGENT}
+    attempts = 0
+    while True:
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code in RETRY_STATUSES and attempts < len(RETRY_BACKOFFS):
+                time.sleep(RETRY_BACKOFFS[attempts])
+                attempts += 1
+                continue
+            raise SystemExit(f"error: GitLab API GET {url} returned {e.code}")
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempts < len(RETRY_BACKOFFS):
+                time.sleep(RETRY_BACKOFFS[attempts])
+                attempts += 1
+                continue
+            raise SystemExit(f"error: GitLab API GET {url} unreachable: {e}")
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
