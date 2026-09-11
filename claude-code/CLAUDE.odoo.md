@@ -118,6 +118,18 @@ agy --dangerously-skip-permissions --model "gemini-pro-agent" --prompt "Upgrade 
 
 Never report that a change is validated unless the delegated test or upgrade completed successfully for every module in the scope. If part of the scope was not run, say which modules were skipped and why.
 
+### Delegated agent scratch and output files
+
+`agy` is a separate process — it never reads this file, so scratch-file discipline must be stated directly in its `--prompt`, not assumed from "File locations" below.
+
+Every `agy` invocation must confine its own working files to `tmp/agy/` and must never write debug scripts, parsed results, or command logs into the repository root or into any `addons/*` directory.
+
+Append to every `agy --prompt`:
+
+```text
+Write all scratch scripts, logs, and parsed output only under tmp/agy/ (create it if missing). Do not create any file outside that directory. Delete tmp/agy/ contents when the task is done. Never write database credentials, API keys, or tokens into any file, including scratch scripts — read them from ir.config_parameter or environment variables at run time only.
+```
+
 ### Ruff linting
 
 The repository uses Ruff.
