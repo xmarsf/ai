@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -549,6 +550,170 @@ def cmd_clean(mr_iid: int) -> dict:
                 shutil.rmtree(pipeline_dir)
                 removed.append(int(pipeline_dir.name))
     return {"removed": removed}
+
+
+ENV_REQUIRED = ("TUNNEL_TOKEN", "HOOK_HOSTNAME")
+ENV_AUTO = ("WEBHOOK_SECRET", "FORK_PROJECT_ID", "LISTENER_UID", "LISTENER_GID")
+ENV_ALL_KEYS = ENV_REQUIRED + ENV_AUTO
+
+
+def _read_env_file(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    env = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        env[key.strip()] = value.strip()
+    return env
+
+
+def _write_env_file(path: Path, env: dict) -> None:
+    path.write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _git_remote_url(remote: str, git_root: str) -> str | None:
+    result = subprocess.run(["git", "remote", "get-url", remote], cwd=git_root,
+                             capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _check_a() -> tuple[bool, str]:
+    try:
+        cfg = load_project_config()
+    except SystemExit as e:
+        return False, str(e.code)
+    git_root, gitlab_url = cfg["git_root"], cfg["gitlab_url"]
+    origin_url = _git_remote_url("origin", git_root)
+    if origin_url is None:
+        return False, f"no 'origin' git remote in {git_root}"
+    upstream_url = _git_remote_url("upstream", git_root)
+    if upstream_url is None:
+        return False, f"no 'upstream' git remote in {git_root}"
+    upstream_host, _ = parse_remote_url(upstream_url)
+    gitlab_host = urllib.parse.urlparse(gitlab_url).netloc
+    if upstream_host != gitlab_host:
+        return False, f"upstream remote host {upstream_host!r} != gitlab_url host {gitlab_host!r}"
+    return True, "ok"
+
+
+def _check_b() -> tuple[bool, str]:
+    try:
+        cfg = load_project_config()
+        token = resolve_gitlab_token(urllib.parse.urlparse(cfg["gitlab_url"]).netloc)
+        api_request(token, "GET", f"{cfg['gitlab_url']}/api/v4/user")
+    except SystemExit as e:
+        return False, str(e.code)
+    return True, "ok"
+
+
+def _check_c() -> tuple[bool, str]:
+    env = _read_env_file(skill_dir() / "docker" / ".env")
+    missing = [k for k in ENV_ALL_KEYS if not env.get(k)]
+    if missing:
+        return False, f"docker/.env missing {missing}"
+    return True, "ok"
+
+
+def _check_d() -> tuple[bool, str]:
+    compose_path = skill_dir() / "docker" / "compose.yml"
+    result = subprocess.run(["docker", "compose", "-f", str(compose_path), "ps", "--format", "json"],
+                             capture_output=True, text=True)
+    if result.returncode != 0:
+        return False, result.stderr.strip()
+    running = set()
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        service = json.loads(line)
+        if service.get("State") == "running":
+            running.add(service.get("Service"))
+    missing = {"cloudflared", "listener"} - running
+    if missing:
+        return False, f"not running: {sorted(missing)}"
+    return True, "ok"
+
+
+def _check_e() -> tuple[bool, str]:
+    try:
+        cfg = load_project_config()
+        gitlab_url = cfg["gitlab_url"]
+        token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
+        env = _read_env_file(skill_dir() / "docker" / ".env")
+        hostname = env.get("HOOK_HOSTNAME")
+        if not hostname:
+            return False, "HOOK_HOSTNAME not set in docker/.env"
+        upstream_id = gitlab_project_id(token, gitlab_url,
+                                         git_remote_project_path("upstream", cfg["git_root"]))
+        hooks = api_request(token, "GET", f"{gitlab_url}/api/v4/projects/{upstream_id}/hooks")
+    except SystemExit as e:
+        return False, str(e.code)
+    hook_url = f"https://{hostname}/hook"
+    matching = [h for h in hooks if h.get("url") == hook_url]
+    if len(matching) != 1:
+        return False, f"expected exactly one hook at {hook_url}, found {len(matching)}"
+    hook = matching[0]
+    if not hook.get("pipeline_events"):
+        return False, "hook exists but pipeline_events is not enabled"
+    if hook.get("alert_status") != "executable":
+        return False, f"hook alert_status is {hook.get('alert_status')!r}, not 'executable'"
+    return True, "ok"
+
+
+def _check_f() -> tuple[bool, str]:
+    if shutil.which("uvx") is None:
+        return False, "'uvx' not found on PATH"
+    return True, "ok"
+
+
+def _check_g() -> tuple[bool, str]:
+    try:
+        cfg = load_project_config()
+    except SystemExit as e:
+        return False, str(e.code)
+    channel, token = cfg.get("telegram_channel"), cfg.get("telegram_token")
+    if not channel or not token:
+        return False, "telegram_channel/telegram_token missing from config/project.json"
+    req = urllib.request.Request(f"{TELEGRAM_API_BASE}/bot{token}/getMe",
+                                  headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+        return False, f"Telegram getMe failed: {e}"
+    if not result.get("ok"):
+        return False, f"Telegram getMe failed: {result.get('description', result)}"
+    return True, "ok"
+
+
+def _check_h(sleep_fn=time.sleep, now_fn=time.time) -> tuple[bool, str]:
+    cfg = load_project_config()
+    gitlab_url = cfg["gitlab_url"]
+    token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
+    upstream_id = gitlab_project_id(token, gitlab_url,
+                                     git_remote_project_path("upstream", cfg["git_root"]))
+    env = _read_env_file(skill_dir() / "docker" / ".env")
+    hook_url = f"https://{env.get('HOOK_HOSTNAME')}/hook"
+    hooks = api_request(token, "GET", f"{gitlab_url}/api/v4/projects/{upstream_id}/hooks")
+    hook = next((h for h in hooks if h.get("url") == hook_url), None)
+    if hook is None:
+        return False, f"no hook at {hook_url} to test"
+
+    marker_path = events_dir() / ".last_delivery"
+    before = marker_path.read_text(encoding="utf-8") if marker_path.is_file() else None
+    api_request(token, "POST", f"{gitlab_url}/api/v4/projects/{upstream_id}"
+                                f"/hooks/{hook['id']}/test/pipeline_events")
+
+    deadline = now_fn() + 15
+    while now_fn() < deadline:
+        after = marker_path.read_text(encoding="utf-8") if marker_path.is_file() else None
+        if after is not None and after != before:
+            return True, "ok"
+        sleep_fn(1)
+    return False, "no delivery observed within 15s"
 
 
 def cmd_push(target: str = "dev", title: str | None = None, no_rebase: bool = False) -> dict:

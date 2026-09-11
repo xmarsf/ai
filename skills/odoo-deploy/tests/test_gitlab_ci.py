@@ -1030,3 +1030,218 @@ def test_cmd_clean_removes_only_matching_pipeline_dirs(tmp_path, monkeypatch):
 def test_cmd_clean_no_events_dir_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(gitlab_ci, "events_dir", lambda: tmp_path / "nope")
     assert gitlab_ci.cmd_clean(mr_iid=7) == {"removed": []}
+
+
+def test_read_env_file_parses_key_value_lines(tmp_path):
+    p = tmp_path / ".env"
+    p.write_text("TUNNEL_TOKEN=abc\n# comment\nHOOK_HOSTNAME=x.vdx.vn\n\n", encoding="utf-8")
+    assert gitlab_ci._read_env_file(p) == {"TUNNEL_TOKEN": "abc", "HOOK_HOSTNAME": "x.vdx.vn"}
+
+
+def test_read_env_file_missing_returns_empty(tmp_path):
+    assert gitlab_ci._read_env_file(tmp_path / "nope") == {}
+
+
+def test_write_env_file_sets_permissions_600(tmp_path):
+    p = tmp_path / ".env"
+    gitlab_ci._write_env_file(p, {"A": "1", "B": "2"})
+    assert p.read_text(encoding="utf-8") == "A=1\nB=2\n"
+    assert (p.stat().st_mode & 0o777) == 0o600
+
+
+def _checks_env(monkeypatch, tmp_path, git_root="/repo", gitlab_url="https://gitlab.vdx.vn",
+                 remotes=None, telegram=None):
+    remotes = remotes if remotes is not None else {
+        "origin": "https://gitlab.vdx.vn/truong/sca.git",
+        "upstream": "https://gitlab.vdx.vn/sungroup/sca",
+    }
+    cfg = {"git_root": git_root, "gitlab_url": gitlab_url}
+    if telegram:
+        cfg.update(telegram)
+
+    def fake_git_remote_url(remote, root):
+        return remotes.get(remote)
+
+    monkeypatch.setattr(gitlab_ci, "load_project_config", lambda: cfg)
+    monkeypatch.setattr(gitlab_ci, "_git_remote_url", fake_git_remote_url)
+    monkeypatch.setattr(gitlab_ci, "resolve_gitlab_token", lambda host: "TOK")
+    monkeypatch.setattr(gitlab_ci, "skill_dir", lambda: tmp_path)
+    monkeypatch.setattr(gitlab_ci, "events_dir", lambda: tmp_path / "docker" / "events")
+    return cfg
+
+
+def test_check_a_ok(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+    ok, _ = gitlab_ci._check_a()
+    assert ok is True
+
+
+def test_check_a_fails_without_upstream_remote(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path, remotes={"origin": "https://gitlab.vdx.vn/truong/sca.git"})
+    ok, detail = gitlab_ci._check_a()
+    assert ok is False and "upstream" in detail
+
+
+def test_check_a_fails_on_host_mismatch(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path, remotes={
+        "origin": "https://gitlab.vdx.vn/truong/sca.git",
+        "upstream": "https://gitlab.other.example/sungroup/sca",
+    })
+    ok, detail = gitlab_ci._check_a()
+    assert ok is False and "host" in detail
+
+
+def test_check_b_ok(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(gitlab_ci, "api_request", lambda token, method, url, **kw: {"id": 1})
+    ok, _ = gitlab_ci._check_b()
+    assert ok is True
+
+
+def test_check_b_fails_on_auth_error(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+
+    def boom(token, method, url, **kw):
+        raise SystemExit("error: GitLab API GET .../user returned 401: ...")
+
+    monkeypatch.setattr(gitlab_ci, "api_request", boom)
+    ok, detail = gitlab_ci._check_b()
+    assert ok is False and "401" in detail
+
+
+def test_check_c_reports_missing_keys(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+    (tmp_path / "docker").mkdir()
+    gitlab_ci._write_env_file(tmp_path / "docker" / ".env", {"TUNNEL_TOKEN": "t"})
+    ok, detail = gitlab_ci._check_c()
+    assert ok is False
+    assert "HOOK_HOSTNAME" in detail
+
+
+def test_check_c_ok_when_all_keys_present(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+    (tmp_path / "docker").mkdir()
+    gitlab_ci._write_env_file(tmp_path / "docker" / ".env",
+                               {k: "x" for k in gitlab_ci.ENV_ALL_KEYS})
+    ok, _ = gitlab_ci._check_c()
+    assert ok is True
+
+
+def test_check_d_reports_missing_services(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+
+    def fake_run(args, **kw):
+        assert args[:2] == ["docker", "compose"]
+        out = '{"Service": "cloudflared", "State": "running"}\n'
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(gitlab_ci.subprocess, "run", fake_run)
+    ok, detail = gitlab_ci._check_d()
+    assert ok is False and "listener" in detail
+
+
+def test_check_d_ok_when_both_running(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+
+    def fake_run(args, **kw):
+        out = ('{"Service": "cloudflared", "State": "running"}\n'
+               '{"Service": "listener", "State": "running"}\n')
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(gitlab_ci.subprocess, "run", fake_run)
+    ok, _ = gitlab_ci._check_d()
+    assert ok is True
+
+
+def test_check_e_ok(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+    (tmp_path / "docker").mkdir()
+    gitlab_ci._write_env_file(tmp_path / "docker" / ".env", {"HOOK_HOSTNAME": "x.vdx.vn"})
+    monkeypatch.setattr(gitlab_ci, "git_remote_project_path", lambda remote, root: "sungroup/sca")
+    monkeypatch.setattr(gitlab_ci, "gitlab_project_id", lambda token, url, path: 21)
+    monkeypatch.setattr(gitlab_ci, "api_request", lambda token, method, url, **kw: [
+        {"url": "https://x.vdx.vn/hook", "pipeline_events": True, "alert_status": "executable"}])
+    ok, _ = gitlab_ci._check_e()
+    assert ok is True
+
+
+def test_check_e_fails_wrong_alert_status(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+    (tmp_path / "docker").mkdir()
+    gitlab_ci._write_env_file(tmp_path / "docker" / ".env", {"HOOK_HOSTNAME": "x.vdx.vn"})
+    monkeypatch.setattr(gitlab_ci, "git_remote_project_path", lambda remote, root: "sungroup/sca")
+    monkeypatch.setattr(gitlab_ci, "gitlab_project_id", lambda token, url, path: 21)
+    monkeypatch.setattr(gitlab_ci, "api_request", lambda token, method, url, **kw: [
+        {"url": "https://x.vdx.vn/hook", "pipeline_events": True, "alert_status": "disabled"}])
+    ok, detail = gitlab_ci._check_e()
+    assert ok is False and "alert_status" in detail
+
+
+def test_check_f_ok_when_uvx_on_path(monkeypatch):
+    monkeypatch.setattr(gitlab_ci.shutil, "which", lambda name: "/usr/bin/uvx")
+    assert gitlab_ci._check_f() == (True, "ok")
+
+
+def test_check_f_fails_when_uvx_missing(monkeypatch):
+    monkeypatch.setattr(gitlab_ci.shutil, "which", lambda name: None)
+    ok, detail = gitlab_ci._check_f()
+    assert ok is False and "uvx" in detail
+
+
+def test_check_g_ok(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path, telegram={"telegram_channel": "-1", "telegram_token": "BOT"})
+
+    def fake_urlopen(req, timeout=None):
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(gitlab_ci.urllib.request, "urlopen", fake_urlopen)
+    ok, _ = gitlab_ci._check_g()
+    assert ok is True
+
+
+def test_check_g_fails_missing_config(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+    ok, detail = gitlab_ci._check_g()
+    assert ok is False and "telegram" in detail
+
+
+def test_check_h_detects_last_delivery_change(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+    ev_dir = tmp_path / "docker" / "events"
+    ev_dir.mkdir(parents=True)
+    (tmp_path / "docker").mkdir(exist_ok=True)
+    gitlab_ci._write_env_file(tmp_path / "docker" / ".env", {"HOOK_HOSTNAME": "x.vdx.vn"})
+    (ev_dir / ".last_delivery").write_text("before", encoding="utf-8")
+    monkeypatch.setattr(gitlab_ci, "git_remote_project_path", lambda remote, root: "sungroup/sca")
+    monkeypatch.setattr(gitlab_ci, "gitlab_project_id", lambda token, url, path: 21)
+
+    calls = {"n": 0}
+
+    def fake_api_request(token, method, url, data=None, **kw):
+        if method == "GET":
+            return [{"id": 9, "url": "https://x.vdx.vn/hook"}]
+        calls["n"] += 1
+        (ev_dir / ".last_delivery").write_text("after", encoding="utf-8")
+        return {}
+
+    monkeypatch.setattr(gitlab_ci, "api_request", fake_api_request)
+    ok, _ = gitlab_ci._check_h(sleep_fn=lambda s: None, now_fn=lambda: 0)
+    assert ok is True
+    assert calls["n"] == 1
+
+
+def test_check_h_times_out_without_delivery(monkeypatch, tmp_path):
+    _checks_env(monkeypatch, tmp_path)
+    ev_dir = tmp_path / "docker" / "events"
+    ev_dir.mkdir(parents=True)
+    (tmp_path / "docker").mkdir(exist_ok=True)
+    gitlab_ci._write_env_file(tmp_path / "docker" / ".env", {"HOOK_HOSTNAME": "x.vdx.vn"})
+    monkeypatch.setattr(gitlab_ci, "git_remote_project_path", lambda remote, root: "sungroup/sca")
+    monkeypatch.setattr(gitlab_ci, "gitlab_project_id", lambda token, url, path: 21)
+    monkeypatch.setattr(gitlab_ci, "api_request", lambda token, method, url, data=None, **kw:
+                         [{"id": 9, "url": "https://x.vdx.vn/hook"}] if method == "GET" else {})
+
+    clock = {"t": 0.0}
+    ok, detail = gitlab_ci._check_h(
+        sleep_fn=lambda s: clock.__setitem__("t", clock["t"] + s), now_fn=lambda: clock["t"])
+    assert ok is False and "15s" in detail
