@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -388,6 +389,102 @@ def cmd_fetch_logs(project_id: int, pipeline_id: int, out_dir: str) -> dict:
     return {"jobs": manifest}
 
 
+def parse_ci_config_path(raw: str) -> tuple[str, str, str]:
+    """'<file>@<project>:<ref>' -> (file, project_path, ref)."""
+    match = re.match(r"^(?P<file>[^@]+)@(?P<project>[^:]+):(?P<ref>.+)$", raw)
+    if not match:
+        raise SystemExit(f"error: cannot parse ci_config_path: {raw!r}")
+    return match.group("file"), match.group("project"), match.group("ref")
+
+
+def repo_file_raw(token: str, gitlab_url: str, project_id: int, ref: str, file_path: str) -> str:
+    encoded_path = urllib.parse.quote(file_path, safe="")
+    encoded_ref = urllib.parse.quote(ref, safe="")
+    url = (f"{gitlab_url}/api/v4/projects/{project_id}/repository/files/"
+           f"{encoded_path}/raw?ref={encoded_ref}")
+    return api_request_raw(token, url).decode("utf-8")
+
+
+def _yaml_scalar(text: str, key: str) -> str | None:
+    match = re.search(rf'^\s*{re.escape(key)}\s*:\s*["\']?([^"\'\n]*?)["\']?\s*$',
+                       text, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def rewrite_ruff_ignore(ruff_toml_text: str, ignore_linters: str) -> str:
+    """Replace the `extend-exclude` line to match CI's own
+    scripts/utils.sh get_ignore_file_command_ruff — confirmed against the
+    real script in Step 3 above."""
+    modules = [m.strip() for m in ignore_linters.split(",") if m.strip()]
+    patterns = ", ".join(f'"{m}/**"' for m in modules)
+    replacement = f"extend-exclude = [{patterns}]"
+    new_text, count = re.subn(r"^extend-exclude.*$", replacement, ruff_toml_text,
+                               count=1, flags=re.MULTILINE)
+    if count == 0:
+        return ruff_toml_text.rstrip("\n") + "\n" + replacement + "\n"
+    return new_text
+
+
+def cmd_lint(target: str = "dev") -> dict:
+    cfg = load_project_config()
+    git_root, gitlab_url = cfg["git_root"], cfg["gitlab_url"]
+    addons_dir = cfg["addons_dir"]
+    token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
+    upstream_path = git_remote_project_path("upstream", git_root)
+    upstream_id = gitlab_project_id(token, gitlab_url, upstream_path)
+
+    project = api_request(token, "GET", f"{gitlab_url}/api/v4/projects/{upstream_id}")
+    ci_config_path = project.get("ci_config_path")
+    if not ci_config_path:
+        raise SystemExit("error: upstream project has no ci_config_path")
+    ci_file, template_path, ref = parse_ci_config_path(ci_config_path)
+    template_id = gitlab_project_id(token, gitlab_url, template_path)
+
+    ci_yaml = repo_file_raw(token, gitlab_url, template_id, ref, ci_file)
+    enable_ruff = _yaml_scalar(ci_yaml, "ENABLE_RUFF")
+    if enable_ruff != "true":
+        return {"skipped": True}
+    ignore_linters = _yaml_scalar(ci_yaml, "IGNORE_LINTERS") or ""
+
+    dockerfile = repo_file_raw(token, gitlab_url, template_id, ref,
+                                "config/docker/Dockerfile.cicd-runner")
+    version_match = re.search(r"ruff==([0-9][0-9.]*)", dockerfile)
+    ruff_toml = repo_file_raw(token, gitlab_url, template_id, ref,
+                               "config/linters/ruff/ruff.toml")
+    if version_match is None or not ruff_toml.strip():
+        raise SystemExit("error: could not parse ruff version or ruff.toml from CI template")
+    ruff_version = version_match.group(1)
+
+    rewritten = rewrite_ruff_ignore(ruff_toml, ignore_linters)
+    fd, tmp_path = tempfile.mkstemp(suffix=".toml")
+    os.close(fd)
+    tmp_config = Path(tmp_path)
+    tmp_config.write_text(rewritten, encoding="utf-8")
+    try:
+        result = subprocess.run(
+            ["uvx", f"ruff@{ruff_version}", "check", "--config", str(tmp_config),
+             "--output-format", "json", addons_dir],
+            capture_output=True, text=True)
+    finally:
+        tmp_config.unlink(missing_ok=True)
+
+    raw_findings = json.loads(result.stdout or "[]")
+    changed = set(subprocess.run(
+        ["git", "diff", "--name-only", f"upstream/{target}...HEAD"],
+        cwd=git_root, capture_output=True, text=True).stdout.splitlines())
+
+    findings = [{"file": f["filename"], "line": f["location"]["row"], "rule": f["code"],
+                 "message": f["message"],
+                 "in_branch": os.path.relpath(f["filename"], git_root) in changed}
+                for f in raw_findings]
+
+    payload = {"ruff_version": ruff_version, "findings": findings}
+    if findings:
+        print(json.dumps(payload, ensure_ascii=False))
+        raise SystemExit(1)
+    return payload
+
+
 def cmd_push(target: str = "dev", title: str | None = None, no_rebase: bool = False) -> dict:
     cfg = load_project_config()
     git_root = cfg["git_root"]
@@ -459,6 +556,9 @@ def _build_parser() -> argparse.ArgumentParser:
     fetch_logs.add_argument("--pipeline", type=int, required=True, dest="pipeline_id")
     fetch_logs.add_argument("--out", required=True, dest="out_dir")
 
+    lint = sub.add_parser("lint")
+    lint.add_argument("--target", default="dev")
+
     return p
 
 
@@ -473,6 +573,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "fetch-logs":
             result = cmd_fetch_logs(project_id=args.project_id, pipeline_id=args.pipeline_id,
                                      out_dir=args.out_dir)
+        elif args.cmd == "lint":
+            result = cmd_lint(target=args.target)
         else:  # pragma: no cover - argparse already rejects unknown subcommands
             raise SystemExit("error: unknown command %r" % args.cmd)
     except SystemExit as e:

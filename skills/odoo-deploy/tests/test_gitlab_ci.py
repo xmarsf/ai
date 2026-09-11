@@ -799,3 +799,112 @@ def test_safe_extract_rejects_zip_slip(tmp_path):
     except SystemExit:
         pass
     assert not (tmp_path.parent / "evil.txt").exists()
+
+
+def test_parse_ci_config_path():
+    assert gitlab_ci.parse_ci_config_path(
+        "pipelines/sun-sca.yml@infra/cicd-pipeline-template:sca") == \
+        ("pipelines/sun-sca.yml", "infra/cicd-pipeline-template", "sca")
+
+
+def test_parse_ci_config_path_malformed_exits():
+    try:
+        gitlab_ci.parse_ci_config_path("not-a-valid-path")
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
+
+
+def test_yaml_scalar_extracts_quoted_value():
+    text = 'variables:\n  ENABLE_RUFF: "true"\n  IGNORE_LINTERS: "mod_a,mod_b"\n'
+    assert gitlab_ci._yaml_scalar(text, "ENABLE_RUFF") == "true"
+    assert gitlab_ci._yaml_scalar(text, "IGNORE_LINTERS") == "mod_a,mod_b"
+
+
+def test_yaml_scalar_missing_key_returns_none():
+    assert gitlab_ci._yaml_scalar("variables:\n  X: 1\n", "ENABLE_RUFF") is None
+
+
+def test_rewrite_ruff_ignore_replaces_extend_exclude_line():
+    toml = 'line-length = 180\nextend-exclude = ["old/**"]\ntarget-version = "py310"\n'
+    rewritten = gitlab_ci.rewrite_ruff_ignore(toml, "mod_a,mod_b")
+    assert 'extend-exclude = ["mod_a/**", "mod_b/**"]' in rewritten
+    assert 'line-length = 180' in rewritten
+    assert 'target-version = "py310"' in rewritten
+
+
+def _lint_env(monkeypatch, ci_yaml, dockerfile="FROM x\nRUN pip install ruff==0.15.20\n",
+              ruff_toml='extend-exclude = ["old/**"]\n', uvx_stdout="[]", changed_files=()):
+    files = {
+        "pipelines/sun-sca.yml": ci_yaml,
+        "config/docker/Dockerfile.cicd-runner": dockerfile,
+        "config/linters/ruff/ruff.toml": ruff_toml,
+    }
+
+    def fake_api_request(token, method, url, data=None, **kw):
+        return {"id": 90, "ci_config_path": "pipelines/sun-sca.yml@infra/cicd-pipeline-template:sca"}
+
+    def fake_raw(token, url):
+        for name, content in files.items():
+            if urllib.parse.quote(name, safe="") in url:
+                return content.encode("utf-8")
+        raise AssertionError(f"unexpected raw URL {url}")
+
+    def fake_run(args, cwd=None, capture_output=None, text=None, check=None, **kw):
+        if args[0] == "uvx":
+            return subprocess.CompletedProcess(args, 0, stdout=uvx_stdout, stderr="")
+        if args[:2] == ["git", "diff"]:
+            return subprocess.CompletedProcess(args, 0, stdout="\n".join(changed_files), stderr="")
+        raise AssertionError(f"unexpected subprocess call: {args}")
+
+    monkeypatch.setattr(gitlab_ci, "api_request", fake_api_request)
+    monkeypatch.setattr(gitlab_ci, "api_request_raw", fake_raw)
+    monkeypatch.setattr(gitlab_ci, "resolve_gitlab_token", lambda host: "TOK")
+    monkeypatch.setattr(gitlab_ci, "git_remote_project_path", lambda remote, root: "sungroup/sca")
+    monkeypatch.setattr(gitlab_ci, "gitlab_project_id", lambda token, url, path: 90)
+    monkeypatch.setattr(gitlab_ci.subprocess, "run", fake_run)
+    monkeypatch.setattr(gitlab_ci, "load_project_config",
+                         lambda: {"git_root": "/repo", "gitlab_url": "https://gitlab.vdx.vn",
+                                  "addons_dir": "/repo/addons"})
+
+
+def test_cmd_lint_disabled_returns_skipped(monkeypatch):
+    _lint_env(monkeypatch, ci_yaml='variables:\n  ENABLE_RUFF: "false"\n')
+    assert gitlab_ci.cmd_lint(target="dev") == {"skipped": True}
+
+
+def test_cmd_lint_unparsable_version_exits_10(monkeypatch):
+    _lint_env(monkeypatch, ci_yaml='variables:\n  ENABLE_RUFF: "true"\n', dockerfile="FROM x\n")
+    try:
+        gitlab_ci.cmd_lint(target="dev")
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
+
+
+def test_cmd_lint_no_findings(monkeypatch):
+    _lint_env(monkeypatch, ci_yaml='variables:\n  ENABLE_RUFF: "true"\n  IGNORE_LINTERS: ""\n',
+              uvx_stdout="[]")
+    result = gitlab_ci.cmd_lint(target="dev")
+    assert result == {"ruff_version": "0.15.20", "findings": []}
+
+
+def test_cmd_lint_findings_flag_in_branch_and_exit_1(monkeypatch, capsys):
+    findings_json = json.dumps([
+        {"filename": "/repo/addons/module_a/models/x.py", "location": {"row": 12},
+         "code": "F401", "message": "unused import"},
+        {"filename": "/repo/addons/module_b/models/y.py", "location": {"row": 3},
+         "code": "E501", "message": "line too long"},
+    ])
+    _lint_env(monkeypatch, ci_yaml='variables:\n  ENABLE_RUFF: "true"\n',
+              uvx_stdout=findings_json, changed_files=["addons/module_a/models/x.py"])
+
+    try:
+        gitlab_ci.cmd_lint(target="dev")
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert e.code == 1
+    printed = json.loads(capsys.readouterr().out)
+    by_file = {f["file"]: f["in_branch"] for f in printed["findings"]}
+    assert by_file["/repo/addons/module_a/models/x.py"] is True
+    assert by_file["/repo/addons/module_b/models/y.py"] is False
