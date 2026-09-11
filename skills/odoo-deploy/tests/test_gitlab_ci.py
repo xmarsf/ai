@@ -232,7 +232,7 @@ def _bare(path: Path) -> Path:
 
 
 def _clone(bare: Path, into: Path, name: str = "origin") -> Path:
-    subprocess.run(["git", "clone", "-q", "-o", name, str(bare), str(into)], check=True)
+    subprocess.run(["git", "clone", "-q", str(bare), str(into)], check=True)
     subprocess.run(["git", "-C", str(into), "config", "user.email", "t@example.com"], check=True)
     subprocess.run(["git", "-C", str(into), "config", "user.name", "T"], check=True)
     return into
@@ -322,10 +322,10 @@ def _push_setup(tmp_path, monkeypatch):
                     check=False)  # fork starts equal to upstream; ignore if already bare-cloned
 
     repo = _clone(upstream_bare, tmp_path / "repo", name="upstream")
-    subprocess.run(["git", "-C", str(repo), "remote", "rename", "upstream", "upstream"],
-                    check=False)
+    subprocess.run(["git", "-C", str(repo), "remote", "rename", "origin", "upstream"],
+                    check=True)
     subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(fork_bare)], check=True)
-    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feature-x"], check=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feature-x", "upstream/dev"], check=True)
     _commit(repo, "b.txt", "feature work")
 
     monkeypatch.chdir(repo)
@@ -345,14 +345,12 @@ def _stub_mr_api(monkeypatch, existing=None, created=None):
             return existing or []
         return created or {"iid": 1, "web_url": "https://gitlab.vdx.vn/g/p/-/merge_requests/1"}
 
-    def fake_gitlab_project_id(token, gitlab_url, path):
-        # Support both known paths and file paths from test setup
-        known = {"sungroup/sca": 21, "truong/sca": 90, "upstream": 21, "fork": 90}
-        return known.get(path, 999)  # Return a default for unknown paths
-
     monkeypatch.setattr(gitlab_ci, "api_request", fake_api_request)
     monkeypatch.setattr(gitlab_ci, "resolve_gitlab_token", lambda host: "TOK")
-    monkeypatch.setattr(gitlab_ci, "gitlab_project_id", fake_gitlab_project_id)
+    monkeypatch.setattr(gitlab_ci, "gitlab_project_id",
+                         lambda token, gitlab_url, path: {"sungroup/sca": 21, "truong/sca": 90}[path])
+    monkeypatch.setattr(gitlab_ci, "git_remote_project_path",
+                         lambda remote, root: {"upstream": "sungroup/sca", "origin": "truong/sca"}[remote])
     return calls
 
 

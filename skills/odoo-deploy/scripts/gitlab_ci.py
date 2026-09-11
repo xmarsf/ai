@@ -59,16 +59,11 @@ _HTTPS_REMOTE_RE = re.compile(r"^https?://(?:[^@/]+@)?([^/]+)/(.+?)(?:\.git)?$")
 
 
 def parse_remote_url(url: str) -> tuple[str, str]:
-    """(host, project_path) from an SSH, HTTPS git remote URL, or local file path."""
+    """(host, project_path) from an SSH or HTTPS git remote URL."""
     match = _HTTPS_REMOTE_RE.match(url) or _SSH_REMOTE_RE.match(url)
-    if match:
-        return match.group(1), match.group(2)
-    # Handle local file paths (for testing)
-    if url.startswith("/"):
-        # Extract basename, remove .git suffix
-        basename = Path(url).name.removesuffix(".git")
-        return "localhost", basename
-    raise SystemExit(f"error: cannot parse git remote URL: {url}")
+    if not match:
+        raise SystemExit(f"error: cannot parse git remote URL: {url}")
+    return match.group(1), match.group(2)
 
 
 def git_remote_project_path(remote: str, git_root: str) -> str | None:
@@ -236,22 +231,16 @@ def cmd_push(target: str = "dev", title: str | None = None, no_rebase: bool = Fa
     if branch in PROTECTED_BRANCHES or branch == target:
         raise SystemExit(f"error: refusing to push protected/target branch {branch!r}")
 
-    # Check if we need to push before rebasing
-    sha = rev_parse(git_root, "HEAD")
-    subprocess.run(["git", "fetch", "origin", branch], cwd=git_root,
-                    capture_output=True, text=True)
-    origin_sha = rev_parse(git_root, f"origin/{branch}")
-
-    # Rebase only if we're going to push (need to push)
-    if not no_rebase and origin_sha != sha:
+    if not no_rebase:
         subprocess.run(["git", "fetch", "upstream", target], cwd=git_root,
                         check=True, capture_output=True, text=True)
         conflicts = rebase_onto(git_root, f"upstream/{target}")
         if conflicts is not None:
             print(json.dumps({"conflicts": conflicts}, ensure_ascii=False))
             raise SystemExit(4)
-        sha = rev_parse(git_root, "HEAD")
 
+    sha = rev_parse(git_root, "HEAD")
+    origin_sha = rev_parse(git_root, f"origin/{branch}")
     out: dict = {"sha": sha}
     if origin_sha == sha:
         out["pushed"] = False
