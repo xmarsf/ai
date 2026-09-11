@@ -50,17 +50,13 @@ Run all git commands from the project repo root (the checkout holding the addons
     stashes your uncommitted fixes.
 - [ ] Commit locally with a message per the project's commit style (e.g.
   `[TYPE] module_name: short desc`). Stop here unless the next bullet applies.
-- [ ] Push + open the MR only if the user explicitly asked this session — never as
-  an automatic follow-on. Order: fetch `upstream` → checkout/create the local
-  working branch → `git add -A` + commit (skipped if clean) → rebase onto
-  `upstream` → force-with-lease push to `origin` → open/reuse a cross-project MR
-  `origin/<branch>` → `upstream/<branch>`, print the MR URL. On rebase conflict the
-  script exits and tells you to resolve, then `git rebase --continue` and re-run
-  (it skips the already-done commit and proceeds from rebase). Provider
-  authentication needs an access token (`api` scope) exported — one-time setup;
-  check `[ -n "$GITLAB_TOKEN" ]` first, don't `echo` the value.
-
-  Report the MR URL to the user — don't just say "pushed."
+- [ ] Push + open the MR: once implementation work is committed and
+  verified, offer the separate `odoo-deploy` skill — ask once, "Push to
+  GitLab and drive CI to green?" No → stop here; this playbook's job
+  (commit) is already done. Yes → hand off to `odoo-deploy`'s own flow
+  (push, open/reuse the MR, wait on the pipeline, fix-and-repush loop on
+  failure); never push or open the MR directly from this playbook, and
+  never as an automatic follow-on without that explicit "yes".
 
 ## Example instance
 
