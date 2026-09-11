@@ -418,8 +418,8 @@ def rewrite_ruff_ignore(ruff_toml_text: str, ignore_linters: str) -> str:
     modules = [m.strip() for m in ignore_linters.split(",") if m.strip()]
     patterns = ", ".join(f'"{m}/**"' for m in modules)
     replacement = f"extend-exclude = [{patterns}]"
-    new_text, count = re.subn(r"^extend-exclude.*$", replacement, ruff_toml_text,
-                               count=1, flags=re.MULTILINE)
+    new_text, count = re.subn(r"^extend-exclude\s*=\s*\[.*?\]", replacement, ruff_toml_text,
+                               count=1, flags=re.MULTILINE | re.DOTALL)
     if count == 0:
         return ruff_toml_text.rstrip("\n") + "\n" + replacement + "\n"
     return new_text
@@ -461,14 +461,19 @@ def cmd_lint(target: str = "dev") -> dict:
     tmp_config = Path(tmp_path)
     tmp_config.write_text(rewritten, encoding="utf-8")
     try:
-        result = subprocess.run(
-            ["uvx", f"ruff@{ruff_version}", "check", "--config", str(tmp_config),
-             "--output-format", "json", addons_dir],
-            capture_output=True, text=True)
+        try:
+            result = subprocess.run(
+                ["uvx", f"ruff@{ruff_version}", "check", "--config", str(tmp_config),
+                 "--output-format", "json", addons_dir],
+                capture_output=True, text=True)
+        except FileNotFoundError:
+            raise SystemExit("error: uvx not found; install with 'pipx install uv' or similar")
+        try:
+            raw_findings = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"error: ruff output was not valid JSON: {e}")
     finally:
         tmp_config.unlink(missing_ok=True)
-
-    raw_findings = json.loads(result.stdout or "[]")
     changed = set(subprocess.run(
         ["git", "diff", "--name-only", f"upstream/{target}...HEAD"],
         cwd=git_root, capture_output=True, text=True).stdout.splitlines())
