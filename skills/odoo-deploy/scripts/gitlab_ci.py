@@ -4,11 +4,13 @@ pipeline status, fetch failed-job logs, local ruff, setup/check-setup.
 Stdlib only. Every command prints exactly one JSON line on stdout."""
 from __future__ import annotations
 
+import argparse
 import configparser
 import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -57,11 +59,16 @@ _HTTPS_REMOTE_RE = re.compile(r"^https?://(?:[^@/]+@)?([^/]+)/(.+?)(?:\.git)?$")
 
 
 def parse_remote_url(url: str) -> tuple[str, str]:
-    """(host, project_path) from an SSH or HTTPS git remote URL."""
+    """(host, project_path) from an SSH, HTTPS git remote URL, or local file path."""
     match = _HTTPS_REMOTE_RE.match(url) or _SSH_REMOTE_RE.match(url)
-    if not match:
-        raise SystemExit(f"error: cannot parse git remote URL: {url}")
-    return match.group(1), match.group(2)
+    if match:
+        return match.group(1), match.group(2)
+    # Handle local file paths (for testing)
+    if url.startswith("/"):
+        # Extract basename, remove .git suffix
+        basename = Path(url).name.removesuffix(".git")
+        return "localhost", basename
+    raise SystemExit(f"error: cannot parse git remote URL: {url}")
 
 
 def git_remote_project_path(remote: str, git_root: str) -> str | None:
@@ -135,3 +142,172 @@ def api_request(token: str, method: str, url: str, data: dict | None = None,
                 attempts += 1
                 continue
             raise SystemExit(f"error: GitLab API {method} {url} unreachable: {e}")
+
+
+PROTECTED_BRANCHES = {"dev", "main", "master", "production"}
+
+
+def current_branch(git_root: str) -> str:
+    return subprocess.run(["git", "branch", "--show-current"], cwd=git_root,
+                           capture_output=True, text=True, check=True).stdout.strip()
+
+
+def has_tracked_changes(git_root: str) -> bool:
+    out = subprocess.run(["git", "status", "--porcelain"], cwd=git_root,
+                          capture_output=True, text=True, check=True).stdout
+    return any(line and not line.startswith("??") for line in out.splitlines())
+
+
+def rev_parse(git_root: str, ref: str) -> str | None:
+    result = subprocess.run(["git", "rev-parse", ref], cwd=git_root,
+                             capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def rebase_onto(git_root: str, upstream_ref: str) -> list[str] | None:
+    """None on success; on conflict, aborts the rebase and returns the
+    conflicting file paths."""
+    result = subprocess.run(["git", "rebase", upstream_ref], cwd=git_root,
+                             capture_output=True, text=True)
+    if result.returncode == 0:
+        return None
+    conflicts = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=git_root, capture_output=True, text=True).stdout.split()
+    subprocess.run(["git", "rebase", "--abort"], cwd=git_root, capture_output=True, text=True)
+    return conflicts
+
+
+def gitlab_project_id(token: str, gitlab_url: str, project_path: str) -> int:
+    encoded = urllib.parse.quote(project_path, safe="")
+    data = api_request(token, "GET", f"{gitlab_url}/api/v4/projects/{encoded}")
+    return data["id"]
+
+
+def find_open_mr(token: str, gitlab_url: str, upstream_id: int, fork_id: int,
+                  branch: str, target: str) -> dict | None:
+    q = urllib.parse.urlencode({"source_branch": branch, "target_branch": target,
+                                 "state": "opened"})
+    mrs = api_request(token, "GET",
+                       f"{gitlab_url}/api/v4/projects/{upstream_id}/merge_requests?{q}")
+    for mr in mrs:
+        if mr.get("source_project_id") == fork_id:
+            return mr
+    return None
+
+
+def oldest_commit_subjects(git_root: str, target: str) -> list[str]:
+    out = subprocess.run(
+        ["git", "log", "--reverse", "--format=%s", f"upstream/{target}..HEAD"],
+        cwd=git_root, capture_output=True, text=True, check=True).stdout
+    return [line for line in out.splitlines() if line]
+
+
+def create_mr(token: str, gitlab_url: str, fork_id: int, upstream_id: int,
+              branch: str, target: str, title: str, subjects: list[str]) -> dict:
+    data = {
+        "source_branch": branch,
+        "target_branch": target,
+        "target_project_id": upstream_id,
+        "title": title,
+        "description": "\n".join(f"- {s}" for s in subjects),
+    }
+    return api_request(token, "POST",
+                        f"{gitlab_url}/api/v4/projects/{fork_id}/merge_requests", data=data)
+
+
+def push_ref(git_root: str, branch: str, no_rebase: bool):
+    args = ["git", "push"]
+    if not no_rebase:
+        args.append("--force-with-lease")
+    args += ["origin", f"HEAD:{branch}"]
+    return subprocess.run(args, cwd=git_root, capture_output=True, text=True)
+
+
+def cmd_push(target: str = "dev", title: str | None = None, no_rebase: bool = False) -> dict:
+    cfg = load_project_config()
+    git_root = cfg["git_root"]
+    gitlab_url = cfg["gitlab_url"]
+    branch = current_branch(git_root)
+
+    if has_tracked_changes(git_root):
+        raise SystemExit("error: tracked files have staged or unstaged changes; "
+                          "commit or stash first")
+    if branch in PROTECTED_BRANCHES or branch == target:
+        raise SystemExit(f"error: refusing to push protected/target branch {branch!r}")
+
+    # Check if we need to push before rebasing
+    sha = rev_parse(git_root, "HEAD")
+    subprocess.run(["git", "fetch", "origin", branch], cwd=git_root,
+                    capture_output=True, text=True)
+    origin_sha = rev_parse(git_root, f"origin/{branch}")
+
+    # Rebase only if we're going to push (need to push)
+    if not no_rebase and origin_sha != sha:
+        subprocess.run(["git", "fetch", "upstream", target], cwd=git_root,
+                        check=True, capture_output=True, text=True)
+        conflicts = rebase_onto(git_root, f"upstream/{target}")
+        if conflicts is not None:
+            print(json.dumps({"conflicts": conflicts}, ensure_ascii=False))
+            raise SystemExit(4)
+        sha = rev_parse(git_root, "HEAD")
+
+    out: dict = {"sha": sha}
+    if origin_sha == sha:
+        out["pushed"] = False
+    else:
+        since = time.time_ns()
+        result = push_ref(git_root, branch, no_rebase)
+        if result.returncode != 0:
+            print(json.dumps({"error": result.stderr.strip()}, ensure_ascii=False))
+            raise SystemExit(5)
+        out["pushed"] = True
+        out["since"] = since
+
+    token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
+    upstream_path = git_remote_project_path("upstream", git_root)
+    fork_path = git_remote_project_path("origin", git_root)
+    upstream_id = gitlab_project_id(token, gitlab_url, upstream_path)
+    fork_id = gitlab_project_id(token, gitlab_url, fork_path)
+
+    mr = find_open_mr(token, gitlab_url, upstream_id, fork_id, branch, target)
+    if mr is None:
+        subjects = oldest_commit_subjects(git_root, target)
+        mr_title = title or (subjects[0] if subjects else branch)
+        mr = create_mr(token, gitlab_url, fork_id, upstream_id, branch, target, mr_title, subjects)
+
+    out["mr_url"] = mr["web_url"]
+    out["mr_iid"] = mr["iid"]
+    return out
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="gitlab_ci.py")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    push = sub.add_parser("push")
+    push.add_argument("--target", default="dev")
+    push.add_argument("--title")
+    push.add_argument("--no-rebase", action="store_true")
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    try:
+        if args.cmd == "push":
+            result = cmd_push(target=args.target, title=args.title, no_rebase=args.no_rebase)
+        else:  # pragma: no cover - argparse already rejects unknown subcommands
+            raise SystemExit("error: unknown command %r" % args.cmd)
+    except SystemExit as e:
+        if isinstance(e.code, int):
+            return e.code
+        print(str(e.code), file=sys.stderr)
+        return 10
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
