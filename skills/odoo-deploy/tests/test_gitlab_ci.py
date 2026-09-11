@@ -950,3 +950,83 @@ def test_cmd_lint_ruff_invalid_json_exits_10(monkeypatch):
         assert e.code != 0  # Should be 10 (message-only exit)
         assert isinstance(e.code, str)
         assert "json" in e.code.lower()
+
+
+def test_cmd_retry_job(monkeypatch):
+    def fake_api_request(token, method, url, data=None, **kw):
+        assert method == "POST"
+        assert url == "https://gitlab.vdx.vn/api/v4/projects/21/jobs/999/retry"
+        return {"id": 1000, "pipeline": {"id": 56}}
+
+    monkeypatch.setattr(gitlab_ci, "api_request", fake_api_request)
+    monkeypatch.setattr(gitlab_ci, "resolve_gitlab_token", lambda host: "TOK")
+    monkeypatch.setattr(gitlab_ci, "load_project_config",
+                         lambda: {"git_root": "/repo", "gitlab_url": "https://gitlab.vdx.vn"})
+
+    result = gitlab_ci.cmd_retry_job(project_id=21, job_id=999)
+    assert result["job_id"] == 1000
+    assert result["pipeline_id"] == 56
+    assert isinstance(result["since"], int)
+
+
+def test_cmd_notify_sends_and_reports_sent(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["body"] = json.loads(req.data)
+        seen["headers"] = dict(req.headers)
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(gitlab_ci.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gitlab_ci, "load_project_config",
+                         lambda: {"git_root": "/repo", "gitlab_url": "https://gitlab.vdx.vn",
+                                  "telegram_channel": "-100", "telegram_token": "BOTTOK"})
+
+    result = gitlab_ci.cmd_notify(text="MR !3 green")
+    assert result == {"telegram": "sent"}
+    assert seen["url"] == "https://api.telegram.org/botBOTTOK/sendMessage"
+    assert seen["body"] == {"chat_id": "-100", "text": "MR !3 green"}
+    assert seen["headers"]["User-agent"] == gitlab_ci.USER_AGENT
+
+
+def test_cmd_notify_failure_reports_reason_exit_0(monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.URLError("network down")
+
+    monkeypatch.setattr(gitlab_ci.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gitlab_ci, "load_project_config",
+                         lambda: {"git_root": "/repo", "gitlab_url": "https://gitlab.vdx.vn",
+                                  "telegram_channel": "-100", "telegram_token": "BOTTOK"})
+
+    result = gitlab_ci.cmd_notify(text="x")
+    assert result["telegram"].startswith("failed:")
+    assert "BOTTOK" not in json.dumps(result)  # token never printed
+
+
+def test_cmd_notify_missing_config_reports_failed(monkeypatch):
+    monkeypatch.setattr(gitlab_ci, "load_project_config",
+                         lambda: {"git_root": "/repo", "gitlab_url": "https://gitlab.vdx.vn"})
+    result = gitlab_ci.cmd_notify(text="x")
+    assert result["telegram"].startswith("failed:")
+
+
+def test_cmd_clean_removes_only_matching_pipeline_dirs(tmp_path, monkeypatch):
+    monkeypatch.setattr(gitlab_ci, "events_dir", lambda: tmp_path)
+    d1 = tmp_path / "21" / "55"
+    d1.mkdir(parents=True)
+    (d1 / "100.json").write_text(json.dumps({"merge_request": {"iid": 7}}), encoding="utf-8")
+    d2 = tmp_path / "21" / "56"
+    d2.mkdir(parents=True)
+    (d2 / "101.json").write_text(json.dumps({"merge_request": {"iid": 8}}), encoding="utf-8")
+
+    result = gitlab_ci.cmd_clean(mr_iid=7)
+
+    assert result == {"removed": [55]}
+    assert not d1.exists()
+    assert d2.exists()
+
+
+def test_cmd_clean_no_events_dir_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(gitlab_ci, "events_dir", lambda: tmp_path / "nope")
+    assert gitlab_ci.cmd_clean(mr_iid=7) == {"removed": []}

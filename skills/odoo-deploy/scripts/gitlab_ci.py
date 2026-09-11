@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -490,6 +491,66 @@ def cmd_lint(target: str = "dev") -> dict:
     return payload
 
 
+def cmd_retry_job(project_id: int, job_id: int) -> dict:
+    cfg = load_project_config()
+    gitlab_url = cfg["gitlab_url"]
+    token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
+    since = time.time_ns()
+    new_job = api_request(token, "POST",
+                           f"{gitlab_url}/api/v4/projects/{project_id}/jobs/{job_id}/retry")
+    return {"job_id": new_job["id"], "pipeline_id": new_job["pipeline"]["id"], "since": since}
+
+
+TELEGRAM_API_BASE = "https://api.telegram.org"
+
+
+def cmd_notify(text: str) -> dict:
+    cfg = load_project_config()
+    channel, token = cfg.get("telegram_channel"), cfg.get("telegram_token")
+    if not channel or not token:
+        return {"telegram": "failed: no telegram_channel/telegram_token in config/project.json"}
+    url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
+    body = json.dumps({"chat_id": channel, "text": text}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": "application/json", "User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return {"telegram": f"failed: HTTP {e.code}"}
+    except (urllib.error.URLError, TimeoutError) as e:
+        return {"telegram": f"failed: {e}"}
+    if not result.get("ok"):
+        return {"telegram": f"failed: {result.get('description', result)}"}
+    return {"telegram": "sent"}
+
+
+def cmd_clean(mr_iid: int) -> dict:
+    ev_dir = events_dir()
+    removed = []
+    if not ev_dir.is_dir():
+        return {"removed": removed}
+    for project_dir in ev_dir.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for pipeline_dir in project_dir.iterdir():
+            if not pipeline_dir.is_dir():
+                continue
+            matches = False
+            for event_file in pipeline_dir.glob("*.json"):
+                try:
+                    data = json.loads(event_file.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if (data.get("merge_request") or {}).get("iid") == mr_iid:
+                    matches = True
+                    break
+            if matches:
+                shutil.rmtree(pipeline_dir)
+                removed.append(int(pipeline_dir.name))
+    return {"removed": removed}
+
+
 def cmd_push(target: str = "dev", title: str | None = None, no_rebase: bool = False) -> dict:
     cfg = load_project_config()
     git_root = cfg["git_root"]
@@ -564,6 +625,16 @@ def _build_parser() -> argparse.ArgumentParser:
     lint = sub.add_parser("lint")
     lint.add_argument("--target", default="dev")
 
+    retry_job = sub.add_parser("retry-job")
+    retry_job.add_argument("--project", type=int, required=True, dest="project_id")
+    retry_job.add_argument("--job", type=int, required=True, dest="job_id")
+
+    notify = sub.add_parser("notify")
+    notify.add_argument("--text", required=True)
+
+    clean = sub.add_parser("clean")
+    clean.add_argument("--mr", type=int, required=True, dest="mr_iid")
+
     return p
 
 
@@ -580,6 +651,12 @@ def main(argv: list[str] | None = None) -> int:
                                      out_dir=args.out_dir)
         elif args.cmd == "lint":
             result = cmd_lint(target=args.target)
+        elif args.cmd == "retry-job":
+            result = cmd_retry_job(project_id=args.project_id, job_id=args.job_id)
+        elif args.cmd == "notify":
+            result = cmd_notify(text=args.text)
+        elif args.cmd == "clean":
+            result = cmd_clean(mr_iid=args.mr_iid)
         else:  # pragma: no cover - argparse already rejects unknown subcommands
             raise SystemExit("error: unknown command %r" % args.cmd)
     except SystemExit as e:
