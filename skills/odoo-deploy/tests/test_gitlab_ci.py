@@ -908,3 +908,45 @@ def test_cmd_lint_findings_flag_in_branch_and_exit_1(monkeypatch, capsys):
     by_file = {f["file"]: f["in_branch"] for f in printed["findings"]}
     assert by_file["/repo/addons/module_a/models/x.py"] is True
     assert by_file["/repo/addons/module_b/models/y.py"] is False
+
+
+def test_rewrite_ruff_ignore_handles_multiline_array():
+    toml = 'line-length = 180\nextend-exclude = [\n  "old/**",\n  "other/**",\n]\ntarget-version = "py310"\n'
+    rewritten = gitlab_ci.rewrite_ruff_ignore(toml, "mod_a,mod_b")
+    assert 'extend-exclude = ["mod_a/**", "mod_b/**"]' in rewritten
+    assert 'line-length = 180' in rewritten
+    assert 'target-version = "py310"' in rewritten
+    # Verify no orphan brackets or dangling lines
+    assert '"old/**"' not in rewritten
+    assert '"other/**"' not in rewritten
+
+
+def test_cmd_lint_uvx_not_found_exits_10(monkeypatch):
+    def fake_run(args, cwd=None, capture_output=None, text=None, check=None, **kw):
+        if args[0] == "uvx":
+            raise FileNotFoundError("uvx not found")
+        raise AssertionError(f"unexpected subprocess call: {args}")
+
+    _lint_env(monkeypatch, ci_yaml='variables:\n  ENABLE_RUFF: "true"\n')
+    monkeypatch.setattr(gitlab_ci.subprocess, "run", fake_run)
+
+    try:
+        gitlab_ci.cmd_lint(target="dev")
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert e.code != 0  # Should be 10 (message-only exit)
+        assert isinstance(e.code, str)
+        assert "uvx" in e.code.lower()
+
+
+def test_cmd_lint_ruff_invalid_json_exits_10(monkeypatch):
+    _lint_env(monkeypatch, ci_yaml='variables:\n  ENABLE_RUFF: "true"\n',
+              uvx_stdout="not valid json")
+
+    try:
+        gitlab_ci.cmd_lint(target="dev")
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert e.code != 0  # Should be 10 (message-only exit)
+        assert isinstance(e.code, str)
+        assert "json" in e.code.lower()
