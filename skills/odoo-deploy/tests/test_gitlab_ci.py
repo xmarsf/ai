@@ -4,6 +4,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -661,3 +662,88 @@ def test_main_wait_skipped_exits_2(monkeypatch, capsys):
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1
     assert json.loads(out[0])["status"] == "skipped"
+
+
+def _fetch_logs_env(monkeypatch, jobs, raw=None):
+    monkeypatch.setattr(gitlab_ci, "api_request", lambda token, method, url, data=None, **kw: jobs)
+    monkeypatch.setattr(gitlab_ci, "api_request_raw", raw or (lambda token, url: b"trace\n"))
+    monkeypatch.setattr(gitlab_ci, "resolve_gitlab_token", lambda host: "TOK")
+    monkeypatch.setattr(gitlab_ci, "load_project_config",
+                         lambda: {"git_root": "/repo", "gitlab_url": "https://gitlab.vdx.vn"})
+
+
+def test_api_request_raw_sends_auth_and_user_agent(monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        assert req.headers["Authorization"] == "Bearer TOK"
+        assert req.headers["User-agent"] == gitlab_ci.USER_AGENT
+        return io.BytesIO(b"raw-bytes")
+
+    monkeypatch.setattr(gitlab_ci.urllib.request, "urlopen", fake_urlopen)
+    assert gitlab_ci.api_request_raw("TOK", "https://x/y") == b"raw-bytes"
+
+
+def test_clean_trace_strips_ansi_and_timestamp_prefix():
+    raw = (b"2026-09-11T10:00:00.123456Z 00O \x1b[32mok\x1b[0m\n"
+           b"2026-09-11T10:00:01.000000Z 00O+ next line\n")
+    assert gitlab_ci._clean_trace(raw) == "ok\nnext line\n"
+
+
+def test_cmd_fetch_logs_skips_allow_failure_and_non_failed(monkeypatch, tmp_path):
+    _fetch_logs_env(monkeypatch, jobs=[
+        {"id": 1, "name": "ruff", "stage": "quality", "status": "failed",
+         "allow_failure": False, "failure_reason": "script_failure", "artifacts": []},
+        {"id": 2, "name": "security-scan", "stage": "test", "status": "failed",
+         "allow_failure": True, "failure_reason": "script_failure", "artifacts": []},
+        {"id": 3, "name": "pytest", "stage": "test", "status": "success",
+         "allow_failure": False, "failure_reason": None, "artifacts": []},
+    ])
+
+    result = gitlab_ci.cmd_fetch_logs(project_id=21, pipeline_id=55, out_dir=str(tmp_path))
+
+    assert [j["job"] for j in result["jobs"]] == ["ruff"]
+    assert (tmp_path / "ruff.log").read_text(encoding="utf-8") == "trace\n"
+
+
+def test_cmd_fetch_logs_unzips_archive_artifact(monkeypatch, tmp_path):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("parallel-odoo-test.log", "FAILED some::test\n")
+    zip_bytes = buf.getvalue()
+
+    def fake_raw(token, url):
+        return zip_bytes if url.endswith("/artifacts") else b"trace\n"
+
+    _fetch_logs_env(monkeypatch, jobs=[
+        {"id": 1, "name": "parallel-odoo-pytest", "stage": "test", "status": "failed",
+         "allow_failure": False, "failure_reason": "script_failure",
+         "artifacts": [{"file_type": "archive", "filename": "artifacts.zip"}]},
+    ], raw=fake_raw)
+
+    result = gitlab_ci.cmd_fetch_logs(project_id=21, pipeline_id=55, out_dir=str(tmp_path))
+
+    assert result["jobs"][0]["artifacts"] == str(tmp_path / "parallel-odoo-pytest")
+    assert (tmp_path / "parallel-odoo-pytest" / "parallel-odoo-test.log").read_text(
+        encoding="utf-8") == "FAILED some::test\n"
+
+
+def test_cmd_fetch_logs_no_archive_artifacts_is_null(monkeypatch, tmp_path):
+    _fetch_logs_env(monkeypatch, jobs=[
+        {"id": 1, "name": "ruff", "stage": "quality", "status": "failed",
+         "allow_failure": False, "failure_reason": "script_failure", "artifacts": []},
+    ])
+
+    result = gitlab_ci.cmd_fetch_logs(project_id=21, pipeline_id=55, out_dir=str(tmp_path))
+    assert result["jobs"][0]["artifacts"] is None
+
+
+def test_safe_extract_rejects_zip_slip(tmp_path):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("../../evil.txt", "pwned")
+
+    try:
+        gitlab_ci._safe_extract(buf.getvalue(), tmp_path / "job-name")
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
+    assert not (tmp_path.parent / "evil.txt").exists()
