@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 # Some GitLab/WAF deployments reject the default Python-urllib agent with 403.
@@ -219,6 +220,92 @@ def push_ref(git_root: str, branch: str, no_rebase: bool):
     return subprocess.run(args, cwd=git_root, capture_output=True, text=True)
 
 
+FINAL_STATUSES = {"success", "failed", "canceled", "skipped"}
+EXIT_BY_STATUS = {"success": 0, "failed": 1, "canceled": 2, "skipped": 2}
+NO_PIPELINE_SECONDS = 600
+
+
+def _iso_to_ns(iso: str) -> int:
+    return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1_000_000_000)
+
+
+def _counts(status: str | None, finished_at: str | None, since: int | None) -> bool:
+    if status not in FINAL_STATUSES:
+        return False
+    if since is None:
+        return True
+    if not finished_at:
+        return False
+    return _iso_to_ns(finished_at) >= since
+
+
+def _scan_events(mr_iid: int, sha: str, since: int | None) -> list[dict]:
+    ev_dir = events_dir()
+    if not ev_dir.is_dir():
+        return []
+    matches = []
+    for path in sorted(ev_dir.rglob("*.json")):
+        try:
+            received_ns = int(path.stem)
+        except ValueError:
+            continue
+        if since is not None and received_ns < since:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        mr = data.get("merge_request") or {}
+        attrs = data.get("object_attributes") or {}
+        if mr.get("iid") == mr_iid and attrs.get("sha") == sha:
+            matches.append(data)
+    return matches
+
+
+def cmd_wait(mr_iid: int, sha: str, since: int | None = None, timeout_minutes: int = 120,
+             sleep_fn=time.sleep, now_fn=time.time) -> dict:
+    cfg = load_project_config()
+    gitlab_url = cfg["gitlab_url"]
+    token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
+    upstream_path = git_remote_project_path("upstream", cfg["git_root"])
+    upstream_id = gitlab_project_id(token, gitlab_url, upstream_path)
+
+    mr = api_request(token, "GET",
+                      f"{gitlab_url}/api/v4/projects/{upstream_id}/merge_requests/{mr_iid}")
+    head = mr.get("head_pipeline") or {}
+    pipeline_exists = head.get("sha") == sha
+    if pipeline_exists and _counts(head.get("status"), head.get("finished_at"), since):
+        return {"pipeline_id": head["id"], "project_id": head["project_id"],
+                "status": head["status"], "web_url": head["web_url"]}
+
+    deadline = now_fn() + timeout_minutes * 60
+    no_pipeline_deadline = now_fn() + NO_PIPELINE_SECONDS
+    while True:
+        if now_fn() >= deadline:
+            print(json.dumps({"reason": "timeout"}, ensure_ascii=False))
+            raise SystemExit(3)
+        if not pipeline_exists and now_fn() >= no_pipeline_deadline:
+            print(json.dumps({"reason": "no_pipeline"}, ensure_ascii=False))
+            raise SystemExit(3)
+
+        events = _scan_events(mr_iid, sha, since)
+        if events:
+            pipeline_exists = True
+        for event in events:
+            attrs = event.get("object_attributes") or {}
+            if attrs.get("status") not in FINAL_STATUSES:
+                continue
+            project_id = (event.get("project") or {}).get("id")
+            pipeline_id = attrs.get("id")
+            pipeline = api_request(token, "GET",
+                                    f"{gitlab_url}/api/v4/projects/{project_id}/pipelines/{pipeline_id}")
+            if _counts(pipeline.get("status"), pipeline.get("finished_at"), since):
+                return {"pipeline_id": pipeline_id, "project_id": project_id,
+                        "status": pipeline["status"], "web_url": pipeline["web_url"]}
+
+        sleep_fn(5)
+
+
 def cmd_push(target: str = "dev", title: str | None = None, no_rebase: bool = False) -> dict:
     cfg = load_project_config()
     git_root = cfg["git_root"]
@@ -279,6 +366,12 @@ def _build_parser() -> argparse.ArgumentParser:
     push.add_argument("--title")
     push.add_argument("--no-rebase", action="store_true")
 
+    wait = sub.add_parser("wait")
+    wait.add_argument("--mr", type=int, required=True, dest="mr_iid")
+    wait.add_argument("--sha", required=True)
+    wait.add_argument("--since", type=int)
+    wait.add_argument("--timeout", type=int, default=120)
+
     return p
 
 
@@ -287,6 +380,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "push":
             result = cmd_push(target=args.target, title=args.title, no_rebase=args.no_rebase)
+        elif args.cmd == "wait":
+            result = cmd_wait(mr_iid=args.mr_iid, sha=args.sha, since=args.since,
+                               timeout_minutes=args.timeout)
         else:  # pragma: no cover - argparse already rejects unknown subcommands
             raise SystemExit("error: unknown command %r" % args.cmd)
     except SystemExit as e:
