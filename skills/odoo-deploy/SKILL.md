@@ -226,10 +226,13 @@ Then ask the user how to proceed.
 
 ## Recovery
 
-`wait` exiting 3 with `reason: no_pipeline`, or a dropped webhook (machine
-was off, tunnel down), is not itself an escalation trigger — GitLab does not
-re-send a failed delivery, but re-running `/odoo-deploy` on the same branch
-recovers the result through `wait`'s own initial GET of the MR's
-`head_pipeline`, which does not depend on the webhook having arrived at all.
-Resume via step 4's `--no-rebase` push (a no-op when already up to date),
-then step 5's `wait` again.
+`wait` exiting 3 with `reason: no_pipeline` or `reason: timeout` — including
+when the cause was a dropped webhook (machine off, tunnel down; GitLab does
+not re-send a failed delivery) — still fires rule 7. Stop and notify the
+user; never silently retry in the background.
+
+Recovery happens on the next user-initiated run: re-running `/odoo-deploy`
+on the same branch picks up whatever happened in the meantime through
+`wait`'s own initial GET of the MR's `head_pipeline`, which does not depend
+on the webhook having arrived at all. That run resumes via step 4's
+`--no-rebase` push (a no-op when already up to date), then step 5's `wait`.

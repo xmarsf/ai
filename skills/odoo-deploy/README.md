@@ -4,6 +4,10 @@ One-time setup for driving GitLab MR pipelines to green through a
 webhook-delivered result. Each section below is what a `check-setup`
 failure's `fix` field points to.
 
+Commands below use `$SKILL_DIR` for this skill's own directory — e.g.
+`~/.claude/skills/odoo-deploy` if installed globally, or wherever this
+repo's `skills/odoo-deploy/` lives if checked into a project directly.
+
 ## 1. Prerequisites
 
 - Owner or Maintainer access (GitLab access level ≥ 40) on the **upstream**
@@ -96,7 +100,7 @@ Each row is a `check-setup` check id.
 
 | id | Checks | If it fails |
 |---|---|---|
-| a | `config/project.json` has `git_root`/`gitlab_url`; `origin`+`upstream` git remotes exist; `upstream`'s host matches `gitlab_url` | Re-run section 3; confirm the addons checkout actually has both remotes (`git remote -v`) |
+| a | `config/project.json` has `git_root`/`gitlab_url`/`addons_dir`; `origin`+`upstream` git remotes exist; `upstream`'s host matches `gitlab_url` | Re-run section 3; confirm the addons checkout actually has both remotes (`git remote -v`) |
 | b | A GitLab token resolves and `GET /user` succeeds | Section 4 |
 | c | `docker/.env` has all six keys | Re-run section 2, then section 5 (`setup` fills the automatic ones) |
 | d | `docker compose ps` shows both `cloudflared` and `listener` running | Re-run section 5 (`gitlab_ci.py setup` brings the stack up); if it's crash-looping instead, `docker compose -f $SKILL_DIR/docker/compose.yml logs` to see why — usually a bad `TUNNEL_TOKEN` or a `WEBHOOK_SECRET`/`FORK_PROJECT_ID` missing from `.env` |
