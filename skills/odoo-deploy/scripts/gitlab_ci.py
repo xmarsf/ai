@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import io
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -306,6 +308,76 @@ def cmd_wait(mr_iid: int, sha: str, since: int | None = None, timeout_minutes: i
         sleep_fn(5)
 
 
+def api_request_raw(token: str, url: str, timeout: int = 60) -> bytes:
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token,
+                                                "User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"error: GitLab API GET {url} returned {e.code}")
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise SystemExit(f"error: GitLab API GET {url} unreachable: {e}")
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+TRACE_PREFIX_RE = re.compile(r"^\S+Z \d+[OE]\+? ")
+
+
+def _clean_trace(raw: bytes) -> str:
+    lines = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        line = ANSI_RE.sub("", line)
+        line = TRACE_PREFIX_RE.sub("", line)
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def _safe_extract(zip_bytes: bytes, dest: Path) -> None:
+    dest = dest.resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for member in zf.infolist():
+            target = (dest / member.filename).resolve()
+            if target != dest and dest not in target.parents:
+                raise SystemExit(f"error: artifact zip entry escapes destination: {member.filename}")
+        zf.extractall(dest)
+
+
+def cmd_fetch_logs(project_id: int, pipeline_id: int, out_dir: str) -> dict:
+    cfg = load_project_config()
+    gitlab_url = cfg["gitlab_url"]
+    token = resolve_gitlab_token(urllib.parse.urlparse(gitlab_url).netloc)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    jobs = api_request(token, "GET",
+                        f"{gitlab_url}/api/v4/projects/{project_id}/pipelines/{pipeline_id}"
+                        f"/jobs?per_page=100")
+    manifest = []
+    for job in jobs:
+        if job.get("status") != "failed" or job.get("allow_failure"):
+            continue
+        trace_raw = api_request_raw(
+            token, f"{gitlab_url}/api/v4/projects/{project_id}/jobs/{job['id']}/trace")
+        trace_path = out / f"{job['name']}.log"
+        trace_path.write_text(_clean_trace(trace_raw), encoding="utf-8")
+
+        artifacts = None
+        if any(a.get("file_type") == "archive" for a in job.get("artifacts") or []):
+            zip_bytes = api_request_raw(
+                token, f"{gitlab_url}/api/v4/projects/{project_id}/jobs/{job['id']}/artifacts")
+            artifacts_dir = out / job["name"]
+            _safe_extract(zip_bytes, artifacts_dir)
+            artifacts = str(artifacts_dir)
+
+        manifest.append({"job": job["name"], "stage": job.get("stage"),
+                          "failure_reason": job.get("failure_reason"),
+                          "trace": str(trace_path), "artifacts": artifacts})
+
+    return {"jobs": manifest}
+
+
 def cmd_push(target: str = "dev", title: str | None = None, no_rebase: bool = False) -> dict:
     cfg = load_project_config()
     git_root = cfg["git_root"]
@@ -372,6 +444,11 @@ def _build_parser() -> argparse.ArgumentParser:
     wait.add_argument("--since", type=int)
     wait.add_argument("--timeout", type=int, default=120)
 
+    fetch_logs = sub.add_parser("fetch-logs")
+    fetch_logs.add_argument("--project", type=int, required=True, dest="project_id")
+    fetch_logs.add_argument("--pipeline", type=int, required=True, dest="pipeline_id")
+    fetch_logs.add_argument("--out", required=True, dest="out_dir")
+
     return p
 
 
@@ -383,6 +460,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "wait":
             result = cmd_wait(mr_iid=args.mr_iid, sha=args.sha, since=args.since,
                                timeout_minutes=args.timeout)
+        elif args.cmd == "fetch-logs":
+            result = cmd_fetch_logs(project_id=args.project_id, pipeline_id=args.pipeline_id,
+                                     out_dir=args.out_dir)
         else:  # pragma: no cover - argparse already rejects unknown subcommands
             raise SystemExit("error: unknown command %r" % args.cmd)
     except SystemExit as e:
