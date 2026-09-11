@@ -76,10 +76,10 @@ https://gitlab.vdx.vn/ = <your-token>
 
 ## 5. Run setup
 
-From the Odoo workspace root:
+From the Odoo workspace root (or any directory under it):
 
 ```bash
-python3 skills/odoo-deploy/scripts/gitlab_ci.py setup
+python3 $SKILL_DIR/scripts/gitlab_ci.py setup
 ```
 
 This fills in the remaining `docker/.env` keys, brings up the `cloudflared`
@@ -99,7 +99,7 @@ Each row is a `check-setup` check id.
 | a | `config/project.json` has `git_root`/`gitlab_url`; `origin`+`upstream` git remotes exist; `upstream`'s host matches `gitlab_url` | Re-run section 3; confirm the addons checkout actually has both remotes (`git remote -v`) |
 | b | A GitLab token resolves and `GET /user` succeeds | Section 4 |
 | c | `docker/.env` has all six keys | Re-run section 2, then section 5 (`setup` fills the automatic ones) |
-| d | `docker compose ps` shows both `cloudflared` and `listener` running | `docker compose -f skills/odoo-deploy/docker/compose.yml logs` — a crash-looping container usually means a bad `TUNNEL_TOKEN` or a `WEBHOOK_SECRET`/`FORK_PROJECT_ID` missing from `.env` |
+| d | `docker compose ps` shows both `cloudflared` and `listener` running | Re-run section 5 (`gitlab_ci.py setup` brings the stack up); if it's crash-looping instead, `docker compose -f $SKILL_DIR/docker/compose.yml logs` to see why — usually a bad `TUNNEL_TOKEN` or a `WEBHOOK_SECRET`/`FORK_PROJECT_ID` missing from `.env` |
 | e | The upstream project has exactly one hook at `https://$HOOK_HOSTNAME/hook`, `pipeline_events: true`, `alert_status: executable` | Re-run section 5 (`setup` creates/updates it); a non-`executable` `alert_status` means GitLab is failing to deliver — check `d` and the Cloudflare dashboard first |
 | f | `uvx` on `PATH` | Section 1 |
 | g | `telegram_channel`/`telegram_token` in `config/project.json`; Telegram `getMe` succeeds | Re-run section 3 with `--setup-telegram` |
