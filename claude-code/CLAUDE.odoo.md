@@ -24,7 +24,6 @@ No `config/project.json` yet → run `odoo setup [--dry-run]` (odoo-cli) before 
 | Triage failing behavior, live/DB inspection | `odoo-debug` |
 | Cross-major port (17/18/19), migration scripts | `odoo-upgrade` |
 | Translation / Weblate `.po` round-trip | `odoo-wlc` |
-| Push to GitLab, open MR, drive CI to green | `odoo-deploy` |
 
 ## Version facts — never from memory
 
@@ -44,6 +43,7 @@ Repo: `/home/xmars/dev/vdx-vn/odoo-cli`, console script `odoo` (not `odoo-cli`).
 | Command | Use |
 | --- | --- |
 | `odoo verify PATHS --root ROOT` | AST+RULES lint + git diff check. Run before calling any change done. |
+| `odoo deps MODULES [--upstream\|--downstream\|--both]` | Transitive manifest dependency closure. Default direction: downstream. |
 | `odoo lint-rules PATHS [--check]` | Mechanical RULES.md checks only |
 | `odoo compat {get,list,check,add}` | Version-verdict queries / proof validation |
 | `odoo view-redundant-string PATHS [--fix]` | Strip redundant view `string=` |
@@ -72,34 +72,22 @@ Delegate all Odoo validation to an Antigravity (`agy`) agent.
 Never validate only the module you edited. Before delegating, build the full validation scope from the dependency graph of the changed modules.
 
 1. List every module touched by the change (from the diff, not from memory).
-2. Read each changed module's `__manifest__.py` and collect its `depends` entries.
-3. Find the reverse dependencies: every addon whose manifest declares a changed module in `depends`.
-4. Repeat step 3 on each newly found module until the set stops growing (transitive dependents).
-5. Order the final set dependency-first (dependencies before dependents).
+2. Get the downstream dependency closure (transitive) with odoo-cli:
 
-Reverse-dependency lookup:
+   ```bash
+   odoo deps <module_1>,<module_2>,... --downstream
+   ```
 
-```bash
-grep -rl "'<changed_module>'" addons/*/__manifest__.py
-```
-
-Include dependents even when the change looks local. These changes break dependent modules before they break the module you edited:
-
-* Overridden or renamed methods and changed method signatures.
-* Renamed, removed, or retyped fields.
-* Changed, renamed, or removed XML external IDs and inherited views.
-* New or changed `ir.model.access.csv` entries, record rules, and groups.
-* Changed `_inherit`, `_name`, or model removal.
-* Changed manifest `depends` or data-file load order.
-
-Confirm each chain against the current manifests. Do not rely on this list alone.
+   This resolves every addon that depends on the changed modules, directly or
+   transitively, and includes the changed modules themselves, already sequenced
+   in dependency order (dependencies before dependents).
 
 #### Step 2 — Delegate the run
 
 Pass the whole scope to a single delegated run. `odoo runtime-test` accepts multiple `--module` arguments, so init and test them together instead of one call per module.
 
 ```bash
-agy --dangerously-skip-permissions --model "gemini-pro-agent" --prompt "Run tests for Odoo modules <module_1> <module_2> ... using 'odoo runtime-test' from odoo-cli, passing every module in one invocation with repeated --module flags, in dependency order. These modules are the changed modules plus all of their transitive dependents. Analyze the output and provide a concise summary of the test results, failures, and relevant file locations."
+agy --dangerously-skip-permissions --model "gemini-flash-3.8" --prompt "Run tests for Odoo modules <module_1> <module_2> ... using 'odoo runtime-test' from odoo-cli, passing every module in one invocation with repeated --module flags, in dependency order. These modules are the changed modules plus all of their transitive dependents. Analyze the output and provide a concise summary of the test results, failures, and relevant file locations."
 ```
 
 After the command finishes:
@@ -114,22 +102,10 @@ If the scope is a mix of modules with and without automated tests, split it into
 When a module in the scope has no automated tests, instruct the agent to run a module upgrade for it instead:
 
 ```bash
-agy --dangerously-skip-permissions --model "gemini-pro-agent" --prompt "Upgrade Odoo modules <module_1> <module_2> ... using odoo-cli, in dependency order, to detect registry, Python import, XML, data loading, access-control, and view validation errors. Analyze the output and provide a concise summary with relevant file locations."
+agy --dangerously-skip-permissions --model "gemini-flash-3.8" --prompt "Upgrade Odoo modules <module_1> <module_2> ... using odoo-cli, in dependency order, to detect registry, Python import, XML, data loading, access-control, and view validation errors. Analyze the output and provide a concise summary with relevant file locations."
 ```
 
 Never report that a change is validated unless the delegated test or upgrade completed successfully for every module in the scope. If part of the scope was not run, say which modules were skipped and why.
-
-### Delegated agent scratch and output files
-
-`agy` is a separate process — it never reads this file, so scratch-file discipline must be stated directly in its `--prompt`, not assumed from "File locations" below.
-
-Every `agy` invocation must confine its own working files to `tmp/agy/` and must never write debug scripts, parsed results, or command logs into the repository root or into any `addons/*` directory.
-
-Append to every `agy --prompt`:
-
-```text
-Write all scratch scripts, logs, and parsed output only under tmp/agy/ (create it if missing). Do not create any file outside that directory. Delete tmp/agy/ contents when the task is done. Never write database credentials, API keys, or tokens into any file, including scratch scripts — read them from ir.config_parameter or environment variables at run time only.
-```
 
 ### Ruff linting
 
@@ -155,7 +131,7 @@ Do not apply Ruff fixes directly with local tools.
 Delegate every Ruff lint and fix operation to an `agy` agent:
 
 ```bash
-agy --model "gemini-pro-agent" --prompt "Run 'ruff check --fix' on <module_or_path> using config addons/ruff.toml. Apply safe fixes automatically. Report all remaining issues with file path, line number, and Ruff rule code. Identify issues that are fixable only with '--unsafe-fixes', but DO NOT apply unsafe fixes. Summarize the safe changes that were applied and the remaining items requiring manual review."
+agy --model "gemini-flash-3.8" --prompt "Run 'ruff check --fix' on <module_or_path> using config addons/ruff.toml. Apply safe fixes automatically. Report all remaining issues with file path, line number, and Ruff rule code. Identify issues that are fixable only with '--unsafe-fixes', but DO NOT apply unsafe fixes. Summarize the safe changes that were applied and the remaining items requiring manual review."
 ```
 
 Safe fixes may be applied by the delegated agent.
