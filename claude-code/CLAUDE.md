@@ -72,6 +72,15 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Code Comments
+
+**Default to no comments. Add one only when the WHY is non-obvious.**
+
+- Well-named identifiers already say WHAT the code does — don't restate that in a comment.
+- Don't reference the current task, fix, or caller ("added for X", "handles the Y case") — that belongs in the commit message, not the code.
+- Only write a comment when it captures something the code itself can't: a hidden constraint, a subtle invariant, a workaround for a specific bug, or behavior that would surprise a reader.
+- If removing the comment wouldn't confuse a future reader, don't write it.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
