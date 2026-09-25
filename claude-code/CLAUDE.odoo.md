@@ -134,7 +134,7 @@ Record the selection per module with a one-line reason (e.g. `sale_custom: tests
 Pass the whole scope to a single delegated run. `odoo runtime-test` accepts multiple `--module` arguments, so init and test them together instead of one call per module. Include the selected tests from Step 2.
 
 ```bash
-agy --dangerously-skip-permissions --model "gemini-pro-agent" --prompt "Run tests for Odoo modules <module_1> <module_2> ... using 'odoo runtime-test' from odoo-cli, passing every module in one invocation with repeated --module flags, in dependency order, and restricting the run to these selected tests: <--tests ... / -k ... from Step 2>. These modules are the changed modules plus all of their transitive dependents. Analyze the output and provide a concise summary of the test results, failures, and relevant file locations."
+agy --dangerously-skip-permissions --model "gemini-flash-3.8" --prompt "Run tests for Odoo modules <module_1> <module_2> ... using 'odoo runtime-test' from odoo-cli, passing every module in one invocation with repeated --module flags, in dependency order, and restricting the run to these selected tests: <--tests ... / -k ... from Step 2>. These modules are the changed modules plus all of their transitive dependents. Analyze the output and provide a concise summary of the test results, failures, and relevant file locations."
 ```
 
 After the command finishes:
@@ -149,7 +149,7 @@ If the scope is a mix of modules with and without selected tests, split it into 
 When a module in the scope has no automated tests, or none matched the change in Step 2, instruct the agent to run a module upgrade for it instead:
 
 ```bash
-agy --dangerously-skip-permissions --model "gemini-pro-agent" --prompt "Upgrade Odoo modules <module_1> <module_2> ... using odoo-cli, in dependency order, to detect registry, Python import, XML, data loading, access-control, and view validation errors. Analyze the output and provide a concise summary with relevant file locations."
+agy --dangerously-skip-permissions --model "gemini-flash-3.8" --prompt "Upgrade Odoo modules <module_1> <module_2> ... using odoo-cli, in dependency order, to detect registry, Python import, XML, data loading, access-control, and view validation errors. Analyze the output and provide a concise summary with relevant file locations."
 ```
 
 Never report that a change is validated unless the delegated test or upgrade completed successfully for every module in the scope. If part of the scope was not run, say which modules were skipped and why.
@@ -178,7 +178,7 @@ Do not apply Ruff fixes directly with local tools.
 Delegate every Ruff lint and fix operation to an `agy` agent:
 
 ```bash
-agy --model "gemini-pro-agent" --prompt "Run 'ruff check --fix' on <module_or_path> using config addons/ruff.toml. Apply safe fixes automatically. Report all remaining issues with file path, line number, and Ruff rule code. Identify issues that are fixable only with '--unsafe-fixes', but DO NOT apply unsafe fixes. Summarize the safe changes that were applied and the remaining items requiring manual review."
+agy --model "gemini-flash-3.8" --prompt "Run 'ruff check --fix' on <module_or_path> using config addons/ruff.toml. Apply safe fixes automatically. Report all remaining issues with file path, line number, and Ruff rule code. Identify issues that are fixable only with '--unsafe-fixes', but DO NOT apply unsafe fixes. Summarize the safe changes that were applied and the remaining items requiring manual review."
 ```
 
 Safe fixes may be applied by the delegated agent.

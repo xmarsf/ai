@@ -58,8 +58,9 @@ Work in the Odoo project the task targets (the repo holding the addons).
 Process playbooks live in this skill, under `playbooks/` — run
 [task-evaluation](playbooks/task-evaluation.md) first on any task; then as
 triggered: [diagnosis-before-implementation](playbooks/diagnosis-before-implementation.md),
-[git-workflow](playbooks/git-workflow.md) (commit; push/MR only when asked),
-[pr-review](playbooks/pr-review.md), [session-review](playbooks/session-review.md).
+[git-workflow](playbooks/git-workflow.md) (commit; offers the separate
+`odoo-deploy` skill for push/MR/CI once verified), [pr-review](playbooks/pr-review.md),
+[session-review](playbooks/session-review.md).
 
 The task skills hold their own playbooks and match the specific one by trigger;
 match at skill granularity here. Read playbooks lazily — open one when its
