@@ -46,7 +46,8 @@ Entry point: [SKILL.md](../SKILL.md), [the odoo skill](../../odoo/SKILL.md)
 | `create`/`write`/`unlink`/`copy`, `@api.constrains`, `@api.depends` compute, state-machine method, security/record rule | `TransactionCase`/`BaseCommon`, `tests/test_*.py` | note: Unit Test Odoo |
 | UI-triggered onchange chain, or view modifier (invisible/readonly/required) gating a field | `Form` — `from odoo.tests import Form` | note: Form Test |
 | Multi-step browser UI flow: wizard, drag-drop, kanban, widget JS | JS tour via `HttpCase.start_tour` | note: Tour Test |
-| HTTP controller/endpoint, no UI | `HttpCase` (no tour) | note: Unit Test Odoo (`HttpCase`); source: `odoo/tests/common.py` |
+| HTTP controller/endpoint, no UI | `TransactionCase` calling the controller/model method directly; `HttpCase` (no tour) only when the real HTTP/auth/session layer is the seam | note: Unit Test Odoo (`HttpCase`); source: `odoo/tests/common.py`; cost: [test-performance-verify](test-performance-verify.md) |
+| Pure Python util (formatter, regex, num2words), no ORM | `unittest.TestCase` | [test-performance-verify](test-performance-verify.md) rule 13 |
 
 - [ ] **Type need/don't** (minimal assertions at the right seam — not "more things"):
 
@@ -78,6 +79,9 @@ tour when request/response suffices.
   `test_testing_utilities/tests/test_form_impl.py`, `test_orm/tests/test_ui.py` +
   `odoo/tests/common.py`.
 - [ ] If a matching knowledge-base note exists for the surface, read it before writing.
+- [ ] **After writing**, run the review pass in
+  [test-performance-verify](test-performance-verify.md) (fixture lifecycle, `Form`/`HttpCase`
+  cost, tracking, xdist safety, `tests/__init__.py` sync).
 - [ ] Optional: skim [reference/test-anti-patterns](reference/test-anti-patterns.md)
   if mocks, heavy fixtures, or duplicate coverage are tempting.
 - [ ] Write tests from the case table, then run them via

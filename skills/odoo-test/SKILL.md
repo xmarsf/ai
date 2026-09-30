@@ -37,6 +37,7 @@ fails/passes on this version", check `odoo compat get <id>` or
 | [write-odoo-tests](playbooks/write-odoo-tests.md) | main entry point — type table, order of operations |
 | [test-case-selection](playbooks/test-case-selection.md) | mandatory before ANY test write — build the case table |
 | [test-module-structure](playbooks/test-module-structure.md) | tests/ layout, Common classes, `setUpClass`/`tearDownClass`, tags |
+| [test-performance-verify](playbooks/test-performance-verify.md) | review/audit of written tests for speed, isolation, xdist safety — or a slow/flaky suite |
 | [test-cross-module](playbooks/test-cross-module.md) | behavior spans addons — owner module, shared fixtures |
 | [tour-test-authoring](playbooks/tour-test-authoring.md) | JS tour + `HttpCase.start_tour` authoring |
 | [patch-documented-test-gap](playbooks/patch-documented-test-gap.md) | a coverage doc marks a method "not covered by any test" |

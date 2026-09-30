@@ -24,7 +24,8 @@ playbook — no usage counter. Process entry: [write-odoo-tests](../write-odoo-t
 | Assert every field | Brittle; unrelated compute noise | Fields that prove the rule |
 | Heaviest sibling fixture always | Slow; false deps | 1–2 records; dual light/heavy OK |
 | Copy dependency `test_*` into this module | Duplicate runs; drift | Inherit Common; re-run theirs |
-| Mutate `setUpClass` records in methods | Leak across tests | Fresh records per mutating test |
+| Mutate `setUpClass` records in methods | Leak across tests (in-memory/non-DB state) | Fresh records per mutating test, or `with_env(self.env)` re-bind when only DB rows change |
+| Speed/isolation violations (`HttpCase` for backend, `.create()` in `setUp`, `Form` as builder, …) | Slow suites, xdist crashes | 19-rule review: [test-performance-verify](../test-performance-verify.md) |
 | Mass-write existing master data in `setUpClass` with no restore | Pollutes later classes / re-runs | Snapshot on `cls`; restore in `tearDownClass` before `super()` (or avoid mutation) |
 | Prefer `addClassCleanup` for business-fixture restore | Hidden side effects; harder to review | `tearDownClass` for fixture restore; `addClassCleanup` for patches/cursors |
 | Rely on demo / residual DB data | Order- and DB-dependent | Create all needed data |

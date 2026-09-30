@@ -38,8 +38,12 @@ the next parent step after this checklist.
   shared menu-management Common → chain commons).
 - [ ] **`setUpClass`**: expensive, read-mostly shared records only. Do not put
   fixtures there that test methods mutate (Test Isolation rule).
-  Per-method create/copy for state you will change. Use `tracking_disable` unless
-  tracking is under test. Set branch discriminators explicitly.
+  Per-method create/copy for state you will change — except DB rows a test mutates
+  under the savepoint, which roll back; re-bind those with `with_env(self.env)` in
+  `setUp` ([test-performance-verify](test-performance-verify.md) §1.3). Never
+  `.create()`/`set_param()` in `setUp`. Use `tracking_disable` unless tracking is under
+  test (set it in the concrete test class, not a shared Common). Set branch
+  discriminators explicitly. Every test file must be imported in `tests/__init__.py`.
 - [ ] **`tearDownClass` for temporary class-level side effects.** When
   `setUpClass` must change **existing** master/shared rows (e.g. zero other meal
   types' ETD ranges so exactly one fixture matches), snapshot originals on `cls`
