@@ -33,9 +33,10 @@ into a project repo, and both must work unmodified.
    url ends in `/api/`) or `WLC_URL`+`WLC_KEY`. Verify: `"$WLC" show <project>`.
    Auth is per-machine, not per-skill-copy — any Weblate server works, not a fixed one.
 3. Project slug: read `config/project.json` key `weblate_project`; fallback: ask user.
-4. GitLab auth (only needed for step 8's `find-mr` fallback): `~/.gitlab`, `[gitlab]` section,
-   one `<host-url> = <token>` line per GitLab host (matched against each component's `repo`
-   host). Not checked upfront — only surfaces as an error if/when step 8 needs it.
+4. Git read access to each component's `repo` (only needed for step 8's `find-mr` fallback,
+   which runs `git ls-remote` on it). A `repo` URL with embedded credentials works as-is;
+   otherwise your own SSH key / git credential helper for that GitLab host must work.
+   Not checked upfront — only surfaces as an error if/when step 8 needs it.
 
 ## Flow
 
@@ -79,16 +80,10 @@ For every entry in `pending.json`:
   (`%s`, `%d`, `%(...)s`, `%%`, newlines, tabs, XML tags), title-case like Odoo UI conventions.
 - Location comments (`model:ir.model.fields,...` = field label, `arch_db` = view text,
   `code:` = runtime string) inform register/length.
-- Ambiguous or business-critical terms → translate anyway (best-effort msgstr), but also
-  record it as a review item (see below). Genuinely unsure → emit `"msgstr": ""` for that
-  key: `apply` leaves the entry untranslated instead of guessing, and it is not reported as
-  an unknown key.
+- Ambiguous or business-critical terms → translate anyway (best-effort msgstr). Genuinely
+  unsure → emit `"msgstr": ""` for that key: `apply` leaves the entry untranslated instead
+  of guessing (it is not reported as an unknown key), and it is listed as not done in step 5.
 Write `{"entries": [{"key": ..., "msgstr": ...}]}` to `$WORK/filled.json` (all entries, one file per component).
-
-Also write `$WORK/needs_review.json` — one entry per key that is ambiguous/business-critical,
-a glossary miss, or deferred (empty `msgstr`):
-`{"entries": [{"key": ..., "msgid": ..., "msgstr": ..., "reason": "ambiguous"|"glossary_miss"|"deferred"}]}`.
-Empty `{"entries": []}` if nothing qualifies — still write the file, don't skip it.
 
 ### 4. Build + validate
 
@@ -102,26 +97,21 @@ on — re-run `dump` and rebuild `filled.json` for those keys.
 `check` exit 1 → fix reported entries (placeholder and msgid mismatches are blockers), rerun.
 Never upload with failing check.
 
-### 5. Review gate (single, all components)
+### 5. Write the summary (no review stop)
 
-Present a table: component | translated | deferred (empty msgstr) | needs_review count.
+There is no review gate — do not wait for the user. Once every selected component has been
+through step 4, write `/tmp/odoo-wlc/<project>/summary.md`:
 
-Then give the user two file paths per component — do not just print a diff inline:
-- **Translated file** (all applied translations): `$WORK/<lang>.po`
-- **Needs-check file** (terms to review — ambiguous, glossary misses, deferred): `$WORK/needs_review.json`
+- **Done** — table: component | translated (`applied` from step 4's `apply`) | remaining untranslated.
+- **Not done** — everything that will not reach Weblate in this run, with the reason:
+  - deferred entries (empty `msgstr` in `filled.json`): component, msgid;
+  - components whose `check` still fails after fixing — these are NOT uploaded in step 6;
+  - components skipped in step 1 (`null` counts: language missing on the component);
+  - any step 6 upload/commit failure that recovery did not fix (append it after step 6).
 
-Tell the user to open `needs_review.json`, correct any `msgstr` values (or fill in blanks
-for deferred entries) directly in that file, and confirm when done — or confirm as-is if
-no changes needed.
+Fuzzy entries are out of scope — mention their count per component, but not as "not done".
 
-WAIT for user confirmation. On confirmation:
-- If `needs_review.json` was edited, merge its `{key, msgstr}` pairs into `$WORK/filled.json`
-  (overwrite matching keys), then go back to step 4 for that component to rebuild + re-check.
-- If unchanged, proceed to step 6.
-
-Do not proceed to step 6 for any component until its review is confirmed.
-
-### 6. Upload + commit (after approval, every selected component)
+### 6. Upload + commit (every component that passed `check`)
 
 ```bash
 "$WLC" upload <project>/<component>/<lang> --input "$WORK/<lang>.po"
@@ -134,18 +124,18 @@ Do not proceed to step 6 for any component until its review is confirmed.
 "$WLC" push <project>
 ```
 
-### 8. Deliver MR URL
+### 8. Discover the MR URL and return to the agent
 
 1. Scan push output for a URL on a line mentioning `merge request` (case-insensitive) —
    Weblate's GitLab MR backend prints the MR it created/updated. That URL is the deliverable.
 2. No URL found (e.g. MR already open, output terse) →
-   `python3 $SKILL_DIR/scripts/weblate_api.py find-mr <project> <first-component>`.
-   This queries the GitLab API directly for the real open MR (source = component's
-   `push_branch`, target = component's `branch` — always the Weblate branch merging to
-   whatever the component's target branch is, e.g. `dev`), not a guessed/constructed link.
-   Requires `~/.gitlab` (see Prerequisites) — if it errors, use the guidance in
-   Failure recovery.
-3. Print final answer: MR URL (or fallback URL) + per-component translated counts.
+   `python3 $SKILL_DIR/scripts/weblate_api.py find-mr <project> <first-uploaded-component>`.
+   This uses git, not the GitLab API: `git ls-remote` on the component's `repo` reads the
+   head of its `push_branch` and GitLab's `refs/merge-requests/<iid>/head` refs, and returns
+   the MR whose head is that commit (highest iid if several) — a real MR, not a guessed link.
+   git cannot see an MR's target branch; it should be the component's `branch` (e.g. `dev`).
+3. Append the MR URL to `summary.md`, then return to the calling agent (no further
+   questions): the MR URL, the Done / Not done summary, and the `summary.md` path.
 
 ## Failure recovery
 
@@ -158,10 +148,11 @@ Do not proceed to step 6 for any component until its review is confirmed.
   `python3 $SKILL_DIR/scripts/weblate_api.py components <project>`.
 - Weblate API HTTP 403 → the request lost its `User-Agent` header (server WAF rejects
   `Python-urllib/*`), not an auth problem. HTTP 401 → bad/expired token in `~/.weblate`.
-- `find-mr` errors "no ~/.gitlab" or "no GitLab token for `<host>`" → add/edit `~/.gitlab`
-  with a `[gitlab]` section, `<host-url> = <token>` (Personal Access Token, `api` scope, for
-  that GitLab host). "no open MR `<src>` -> `<target>`" → the MR may already be merged/closed,
-  or `wlc push` hasn't actually run yet — check Weblate directly for that component.
+- `find-mr` errors "git ls-remote ... failed" → no git read access to that GitLab repo:
+  set up an SSH key or git credential for the host (`git ls-remote <repo>` must work).
+  "branch ... not found" → `wlc push` hasn't actually run yet. "no MR with head ..." → no MR
+  points at the pushed commit (not opened yet, or already merged) — check Weblate/GitLab
+  directly for that component and report it under Not done.
 
 ## Rules (from reference/translation-flow.md)
 

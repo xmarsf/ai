@@ -1,5 +1,4 @@
 import io
-import json
 import sys
 from pathlib import Path
 
@@ -93,67 +92,58 @@ def test_parse_repo_strips_credentials_and_git():
     assert (host, proj) == ("gitlab.vdx.vn", "may10/odoo-qms")
 
 
-GITLAB_INI = """[gitlab]
-https://gitlab.vdx.vn/ = GLTOKEN
-"""
+def test_parse_repo_scp_style():
+    assert weblate_api.parse_repo("git@gitlab.vdx.vn:may10/odoo-qms.git") == (
+        "gitlab.vdx.vn", "may10/odoo-qms")
 
 
-def _gitlab_ini(tmp_path):
-    ini = tmp_path / "gitlab"
-    ini.write_text(GITLAB_INI, encoding="utf-8")
-    return str(ini)
+HEAD = "a" * 40
+LS_REMOTE = ("%s\trefs/heads/weblate-translations\n"
+             "%s\trefs/merge-requests/3/head\n"
+             "%s\trefs/merge-requests/7/head\n"
+             "%s\trefs/merge-requests/9/head\n") % (HEAD, "b" * 40, HEAD, "c" * 40)
 
 
-def test_load_gitlab_config_matches_by_host(tmp_path):
-    tokens = weblate_api.load_gitlab_config(_gitlab_ini(tmp_path))
-    assert weblate_api.gitlab_token_for_host(tokens, "gitlab.vdx.vn") == "GLTOKEN"
+def _fake_git(monkeypatch, stdout):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return weblate_api.subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(weblate_api.subprocess, "run", fake_run)
+    return seen
 
 
-def test_gitlab_token_for_host_missing_raises(tmp_path):
-    tokens = weblate_api.load_gitlab_config(_gitlab_ini(tmp_path))
+def test_find_mr_matches_mr_head_to_branch_head(monkeypatch):
+    seen = _fake_git(monkeypatch, LS_REMOTE)
+    url = weblate_api.find_mr("https://oauth2:tok@gitlab.vdx.vn/g/p.git", "weblate-translations")
+    assert url == "https://gitlab.vdx.vn/g/p/-/merge_requests/7"
+    assert seen["cmd"][:3] == ["git", "ls-remote", "https://oauth2:tok@gitlab.vdx.vn/g/p.git"]
+    assert "refs/heads/weblate-translations" in seen["cmd"]
+    assert "refs/merge-requests/*/head" in seen["cmd"]
+
+
+def test_find_mr_picks_highest_iid_on_same_head(monkeypatch):
+    _fake_git(monkeypatch, LS_REMOTE + "%s\trefs/merge-requests/12/head\n" % HEAD)
+    assert weblate_api.find_mr("git@gitlab.vdx.vn:g/p.git", "weblate-translations") == (
+        "https://gitlab.vdx.vn/g/p/-/merge_requests/12")
+
+
+def test_find_mr_branch_missing_raises(monkeypatch):
+    _fake_git(monkeypatch, "%s\trefs/merge-requests/3/head\n" % HEAD)
     try:
-        weblate_api.gitlab_token_for_host(tokens, "other.example.com")
+        weblate_api.find_mr("git@gitlab.vdx.vn:g/p.git", "weblate-translations")
         assert False, "expected SystemExit"
     except SystemExit:
         pass
 
 
-def test_find_mr_sends_private_token_and_state_opened(monkeypatch):
-    seen = {}
-
-    def fake_urlopen(req):
-        seen["url"] = req.full_url
-        seen["headers"] = dict(req.headers)
-        return io.BytesIO(json.dumps(
-            [{"web_url": "https://gitlab.vdx.vn/g/p/-/merge_requests/7",
-              "updated_at": "2026-08-20T10:00:00Z"}]).encode("utf-8"))
-
-    monkeypatch.setattr(weblate_api.urllib.request, "urlopen", fake_urlopen)
-    url = weblate_api.find_mr("gitlab.vdx.vn", "g/p", "GLTOKEN", "weblate-translations", "dev")
-    assert url == "https://gitlab.vdx.vn/g/p/-/merge_requests/7"
-    assert seen["headers"]["Private-token"] == "GLTOKEN"
-    assert "state=opened" in seen["url"]
-    assert "source_branch=weblate-translations" in seen["url"]
-    assert "target_branch=dev" in seen["url"]
-
-
-def test_find_mr_picks_most_recently_updated(monkeypatch):
-    def fake_urlopen(req):
-        return io.BytesIO(json.dumps([
-            {"web_url": "https://x/mr/1", "updated_at": "2026-08-19T10:00:00Z"},
-            {"web_url": "https://x/mr/2", "updated_at": "2026-08-20T10:00:00Z"},
-        ]).encode("utf-8"))
-
-    monkeypatch.setattr(weblate_api.urllib.request, "urlopen", fake_urlopen)
-    url = weblate_api.find_mr("gitlab.vdx.vn", "g/p", "GLTOKEN", "src", "dev")
-    assert url == "https://x/mr/2"
-
-
-def test_find_mr_no_open_mr_raises(monkeypatch):
-    monkeypatch.setattr(weblate_api.urllib.request, "urlopen",
-                        lambda req: io.BytesIO(b"[]"))
+def test_find_mr_no_matching_mr_raises(monkeypatch):
+    _fake_git(monkeypatch, "%s\trefs/heads/weblate-translations\n%s\trefs/merge-requests/3/head\n"
+              % (HEAD, "b" * 40))
     try:
-        weblate_api.find_mr("gitlab.vdx.vn", "g/p", "GLTOKEN", "src", "dev")
+        weblate_api.find_mr("git@gitlab.vdx.vn:g/p.git", "weblate-translations")
         assert False, "expected SystemExit"
     except SystemExit:
         pass

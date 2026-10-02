@@ -3,8 +3,8 @@
 import configparser
 import json
 import os
+import subprocess
 import urllib.error
-import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -55,7 +55,10 @@ def api_get_paged(cfg, path):
 
 def parse_repo(repo):
     """Split a component's `repo` URL into (host, project_path), e.g.
-    'https://oauth2:tok@gitlab.example.com/grp/proj.git' -> ('gitlab.example.com', 'grp/proj')."""
+    'https://oauth2:tok@gitlab.example.com/grp/proj.git' -> ('gitlab.example.com', 'grp/proj')
+    or scp-style 'git@gitlab.example.com:grp/proj.git' -> same."""
+    if "://" not in repo:                                    # scp-style: host:path
+        repo = repo.replace(":", "/", 1)
     clean = repo.split("://", 1)[-1].split("@", 1)[-1]        # drop scheme + userinfo
     if clean.endswith(".git"):
         clean = clean[:-len(".git")]
@@ -63,43 +66,27 @@ def parse_repo(repo):
     return host, proj
 
 
-def load_gitlab_config(path="~/.gitlab"):
-    """[gitlab]\nhttps://gitlab.example.com/ = <token> — one line per GitLab host."""
-    cp = configparser.ConfigParser(delimiters=('=',))
-    if not cp.read(os.path.expanduser(path)):
-        raise SystemExit("error: no ~/.gitlab — add a [gitlab] section with "
-                          "'<host-url> = <token>' (needed to look up merge requests)")
-    if not cp.has_section("gitlab"):
-        raise SystemExit("error: ~/.gitlab has no [gitlab] section")
-    return {opt.strip().rstrip("/") + "/": val.strip() for opt, val in cp.items("gitlab")}
-
-
-def gitlab_token_for_host(tokens, host):
-    key = "https://" + host + "/"
-    token = tokens.get(key)
-    if not token:
-        raise SystemExit("error: no GitLab token for %s in ~/.gitlab" % key)
-    return token
-
-
-def find_mr(host, project_path, token, source_branch, target_branch):
-    """Query the GitLab API for the real open MR — never guess/construct a URL."""
-    q = urllib.parse.urlencode({"source_branch": source_branch,
-                                "target_branch": target_branch, "state": "opened"})
-    full = "https://%s/api/v4/projects/%s/merge_requests?%s" % (
-        host, urllib.parse.quote(project_path, safe=""), q)
-    req = urllib.request.Request(full, headers={"PRIVATE-TOKEN": token, "User-Agent": USER_AGENT})
+def find_mr(repo, source_branch):
+    """Find the MR for `source_branch` with `git ls-remote` — GitLab exposes every MR as
+    refs/merge-requests/<iid>/head, so no API token is needed. Never guess/construct an iid."""
+    host, proj = parse_repo(repo)
     try:
-        with urllib.request.urlopen(req) as resp:
-            results = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise SystemExit("error: GitLab API %s returned %s" % (full, e.code))
-    except urllib.error.URLError as e:
-        raise SystemExit("error: GitLab API %s unreachable: %s" % (full, e.reason))
-    if not results:
-        raise SystemExit("error: no open MR %s -> %s in %s (has it been pushed/merged already?)"
-                          % (source_branch, target_branch, project_path))
-    return max(results, key=lambda mr: mr["updated_at"])["web_url"]
+        out = subprocess.run(["git", "ls-remote", repo, "refs/heads/" + source_branch,
+                              "refs/merge-requests/*/head"],
+                             capture_output=True, text=True, check=True, timeout=120).stdout
+    except subprocess.CalledProcessError as e:
+        raise SystemExit("error: git ls-remote %s/%s failed: %s" % (host, proj, e.stderr.strip()))
+    refs = {ref: sha for sha, ref in (line.split("\t", 1) for line in out.splitlines() if "\t" in line)}
+    head = refs.get("refs/heads/" + source_branch)
+    if not head:
+        raise SystemExit("error: branch %s not found in %s/%s (has wlc push run?)"
+                          % (source_branch, host, proj))
+    iids = [int(ref.split("/")[2]) for ref, sha in refs.items()
+            if ref.startswith("refs/merge-requests/") and sha == head]
+    if not iids:
+        raise SystemExit("error: no MR with head %s (%s) in %s/%s"
+                          % (source_branch, head[:10], host, proj))
+    return "https://%s/%s/-/merge_requests/%d" % (host, proj, max(iids))
 
 
 def cmd_components(cfg, project):
@@ -149,9 +136,7 @@ def main():
         result = push_branch_info(cfg, args.project, args.component)
     else:
         info = push_branch_info(cfg, args.project, args.component)
-        host, proj = parse_repo(info["repo"])
-        token = gitlab_token_for_host(load_gitlab_config(), host)
-        result = {"url": find_mr(host, proj, token, info["push_branch"], info["branch"])}
+        result = {"url": find_mr(info["repo"], info["push_branch"])}
     print(json.dumps(result, ensure_ascii=False))
 
 

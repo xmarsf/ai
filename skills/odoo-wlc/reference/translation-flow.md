@@ -103,7 +103,7 @@ Weblate pushes the committed `.po` changes to its GitLab branch. Open a merge re
   push-branch` instead.
 - With a GitLab-backed component (`vcs: gitlab`, i.e. the GitLab merge request backend), `wlc push`
   makes the Weblate server open the MR itself; its output contains the MR URL.
-- If that output is missing/terse, don't guess a URL — query the GitLab API for the real open
-  MR (`scripts/weblate_api.py find-mr`, source = `push_branch`, target = `branch`). This needs
-  `~/.gitlab` (`[gitlab]` section, `<host-url> = <token>`), matched by the host in the
-  component's `repo` — never assume a single fixed GitLab host either.
+- If that output is missing/terse, don't guess a URL — discover the real MR with git
+  (`scripts/weblate_api.py find-mr`): `git ls-remote` on the component's `repo` matches the
+  `push_branch` head against GitLab's `refs/merge-requests/<iid>/head` refs. No GitLab token is
+  needed, only git read access to that repo — never assume a single fixed GitLab host either.
